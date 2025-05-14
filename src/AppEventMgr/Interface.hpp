@@ -21,9 +21,10 @@ namespace zw::esp8266::app::eventmgr {
 #define ZW_SYSTEM_STATE_BOOT_IMAGE_ALT BIT2
 #define ZW_SYSTEM_STATE_TIME_NTP_DISABLED BIT3
 #define ZW_SYSTEM_STATE_TIME_NTP_TRACKING BIT4
-#define ZW_SYSTEM_STATE_NET_STA_IP_READY BIT5
-#define ZW_SYSTEM_STATE_NET_STA_RECONNECT BIT6
-#define ZW_SYSTEM_STATE_HTTPD_READY BIT7
+#define ZW_SYSTEM_STATE_TIME_ALIGNED BIT5
+#define ZW_SYSTEM_STATE_NET_STA_IP_READY BIT6
+#define ZW_SYSTEM_STATE_NET_STA_RECONNECT BIT7
+#define ZW_SYSTEM_STATE_HTTPD_READY BIT8
 
 extern EventGroupHandle_t system_states(void);
 
@@ -61,7 +62,7 @@ void SystemEventHandlerWrapper(void* handler_arg, esp_event_base_t event_base, i
                                void* event_data) {
   if (!IsSystemFailed()) {
     handler(event_id, event_data, handler_arg);
-    ESP_LOGI(TAG, "~> Heap: %d; Stack: %d", esp_get_free_heap_size(),
+    ESP_LOGD(TAG, "~> Heap: %d; Stack: %d", esp_get_free_heap_size(),
              uxTaskGetStackHighWaterMark(NULL));
   }
 }

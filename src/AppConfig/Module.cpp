@@ -4,6 +4,9 @@
 #include <memory>
 #include <vector>
 #include <optional>
+#include <unordered_map>
+#include <functional>
+
 #include <string.h>
 #include <sys/stat.h>
 
@@ -31,19 +34,7 @@ inline constexpr char LIVE_CONFIG_PATH[] = "/app_config.json";
 SemaphoreHandle_t access_lock_;
 AppConfig app_config_;
 
-// Parse JSON serialized AppConfig in `data`, and store in provided `config`.
-// Fields in `config` will be left untouched, unless new values are
-// specified in `data`. So one can build layered configs by repeatedly
-// parsing different `data` with the same `config`.
-//
-// If returns failure, input `config` will be kept unchanged.
-// Note the the parsing is fairly lenient, individual bad entries are
-// simply ignored (e.g. unexpected data type). Only serious issues (e.g.
-// malformed JSON structure) will cause the whole function to fail.
-esp_err_t _parse(const char* data, AppConfig& config, bool strict = false);
-
-// Print configuration in debug log.
-void _log(const AppConfig& config);
+std::unordered_map<std::string, GenericFieldHandler> custom_field_handlers_;
 
 //-----------------------
 // Parser implementation
@@ -105,6 +96,7 @@ esp_err_t _parse_wifi(const cJSON* json, AppConfig::Wifi& container, bool strict
 
 esp_err_t _parse_time(const cJSON* json, AppConfig::Time& container, bool strict = false) {
   PARSE_AND_ASSIGN_FIELD(json, container, baseline, string_parser, strict);
+  PARSE_AND_ASSIGN_FIELD(json, container, timezone, string_parser, strict);
   PARSE_AND_ASSIGN_FIELD(json, container, ntp_server, string_parser, strict);
   return ESP_OK;
 }
@@ -154,12 +146,20 @@ esp_err_t _parse(const char* data, AppConfig& container, bool strict) {
   PARSE_CONFIG_OBJ(*json, container, dev_mode, dev_mode, strict);
   PARSE_CONFIG_OBJ(*json, container, http_server, httpd, strict);
 
+  for (const auto& [key, entry] : custom_field_handlers_) {
+    cJSON* item = cJSON_GetObjectItem(*json, key.c_str());
+    if (item != NULL) {
+      ESP_LOGD(TAG, "Parsing custom field '%s'...", key.c_str());
+      ESP_RETURN_ON_ERROR(entry.parse(item, container, strict));
+    }
+  }
+
   failsafe.Drop();
   return ESP_OK;
 }
 
 //-----------------------
-// Logger implementation
+// Logging implementation
 
 #define APPEND_STRINGLIST(str, item)   \
   {                                    \
@@ -207,6 +207,7 @@ void _log_wifi(const AppConfig::Wifi& container) {
 void _log_time(const AppConfig::Time& container) {
   ESP_LOGI(TAG, "Time:");
   ESP_LOGI(TAG, "- Baseline: %s", STRING_VALUE_OR(container.baseline, "(not set)"));
+  ESP_LOGI(TAG, "- Timezone: %s", STRING_VALUE_OR(container.timezone, "(not set)"));
   ESP_LOGI(TAG, "- NTP server: %s", STRING_VALUE_OR(container.ntp_server, "(not set)"));
 }
 
@@ -218,14 +219,13 @@ void _log_http_net_provision(const AppConfig::HttpServer::NetProvision& containe
 }
 
 void _log_http_web_ota(const AppConfig::HttpServer::WebOTA& container) {
-  ESP_LOGI(TAG, "- Web WebOTA %s", container ? "enabled" : "disabled");
+  ESP_LOGI(TAG, "- WebOTA %s", container ? "enabled" : "disabled");
   if (container) {
-    std::string netmask;
-    if (!container.netmask.has_value()) {
-      netmask = "(not specified)";
-    } else {
-      netmask.resize(16);
-      assert(ip4addr_ntoa_r(&container.netmask.value(), &netmask.front(), 17));
+    std::string netmask("(not specified)");
+    if (container.netmask.has_value()) {
+      if (ipaddr_ntoa_r(&*container.netmask, &netmask.front(), 16) == NULL) {
+        netmask = "(format error)";
+      }
     }
     ESP_LOGI(TAG, "  Netmask: %s", netmask.c_str());
   }
@@ -249,6 +249,10 @@ void _log(const AppConfig& container) {
   _log_time(container.time);
   _log_http_server(container.http_server);
 
+  for (const auto& [key, entry] : custom_field_handlers_) {
+    entry.log(container);
+  }
+
   ESP_LOGI(TAG, "----------------------------");
 }
 
@@ -264,8 +268,8 @@ std::string _encode_netmask(const std::optional<ip_addr_t>& addr) {
   std::string netmask;
   if (!addr.has_value()) return netmask;
 
-  netmask.resize(16);
-  assert(ip4addr_ntoa_r(&addr.value(), &netmask.front(), 17));
+  netmask.resize(15);
+  assert(ip4addr_ntoa_r(&addr.value(), &netmask.front(), 16));
   return netmask;
 }
 
@@ -310,6 +314,7 @@ esp_err_t _marshal_dev_mode(utils::AutoReleaseRes<cJSON*>& container,
 esp_err_t _marshal_time(utils::AutoReleaseRes<cJSON*>& container, const AppConfig::Time& base,
                         const AppConfig::Time& update) {
   DIFF_AND_MARSHAL_FIELD(container, base, update, baseline, string_marshal);
+  DIFF_AND_MARSHAL_FIELD(container, base, update, timezone, string_marshal);
   DIFF_AND_MARSHAL_FIELD(container, base, update, ntp_server, string_marshal);
   return ESP_OK;
 }
@@ -346,6 +351,10 @@ esp_err_t _marshal(utils::AutoReleaseRes<cJSON*>& container, const AppConfig& ba
   MARSHAL_CONFIG_OBJ(container, base, update, time, time);
   MARSHAL_CONFIG_OBJ(container, base, update, http_server, httpd);
 
+  for (const auto& [key, entry] : custom_field_handlers_) {
+    ESP_RETURN_ON_ERROR(marshal_config_obj(container, key.c_str(), base, update, entry.marshal));
+  }
+
   return ESP_OK;
 }
 
@@ -366,12 +375,12 @@ esp_err_t _load_config(const std::string& file_path, AppConfig& config) {
     ESP_LOGE(TAG, "Failed to query file stats");
     return ESP_ERR_NOT_FOUND;
   }
-  ESP_LOGI(TAG, "Reading %ld bytes...", st.st_size);
+  ESP_LOGD(TAG, "Reading %ld bytes...", st.st_size);
   utils::DataBuf buffer(st.st_size + 1);
   ESP_RETURN_ON_ERROR((fread(&buffer.front(), 1, st.st_size, *file) == st.st_size) ? ESP_OK
                                                                                    : ESP_FAIL);
   buffer[st.st_size] = 0;
-  return _parse((const char*)&buffer.front(), config);
+  return _parse((const char*)&buffer.front(), config, false);
 }
 
 esp_err_t _store_config(const std::string& file_path, cJSON* json) {
@@ -438,7 +447,7 @@ esp_err_t persist() {
 
   AppConfig base_config;
   {
-    ESP_LOGI(TAG, "Loading system base config...");
+    ESP_LOGD(TAG, "Loading system base config...");
     std::string config_path(ZW_SYSTEM_MOUNT_POINT);
     config_path.append(BASE_CONFIG_PATH);
     ESP_RETURN_ON_ERROR(_load_config(config_path, base_config));
@@ -446,9 +455,10 @@ esp_err_t persist() {
 
   {
     utils::AutoReleaseRes<cJSON*> json;
+    ESP_LOGD(TAG, "Marshalling config...");
     ESP_RETURN_ON_ERROR(_marshal(json, base_config, app_config_));
     if (*json == NULL) {
-      ESP_LOGI(TAG, "New config matches baseline!");
+      ESP_LOGD(TAG, "New config matches baseline!");
       // Create an empty root object
       ESP_RETURN_ON_ERROR(allocate_container(json));
     }
@@ -487,8 +497,8 @@ EXPORT_DECODE_UTIL(std::optional<ip_addr_t>, netmask);
   }
 
 EXPORT_PARSE_FUNC(AppConfig::Wifi::Station, wifi_station);
+EXPORT_PARSE_FUNC(AppConfig::Time, time);
 // EXPORT_PARSE_FUNC(AppConfig::Wifi::Ap, wifi_ap);
-// EXPORT_PARSE_FUNC(AppConfig::Time, time);
 #undef EXPORT_PARSE_FUNC
 
 //------------------------------
@@ -533,13 +543,22 @@ esp_err_t allocate_container(utils::AutoReleaseRes<cJSON*>& container) {
     return _marshal_##func_name(json, type(), config);                               \
   }
 
-// EXPORT_MARSHAL_FUNC(AppConfig::Time, time);
+EXPORT_MARSHAL_FUNC(AppConfig::Time, time);
 // EXPORT_MARSHAL_FUNC(AppConfig::Wifi::Ap, wifi_ap);
 #undef EXPORT_MARSHAL_FUNC
 
+esp_err_t register_field(const std::string& key, GenericFieldHandler&& handler) {
+  auto insert_ret = custom_field_handlers_.emplace(key, std::move(handler));
+  if (!insert_ret.second) {
+    ESP_LOGW(TAG, "Field '%s' already registered", key.c_str());
+    return ESP_ERR_INVALID_STATE;
+  }
+  return ESP_OK;
+}
+
 esp_err_t init() {
   {
-    ESP_LOGI(TAG, "Creating access lock...");
+    ESP_LOGD(TAG, "Creating access lock...");
     access_lock_ =
 #ifdef ZW_APPLIANCE_COMPONENT_CONFIG_RECURSIVE_LOCK
         xSemaphoreCreateRecursiveMutex();
@@ -550,7 +569,7 @@ esp_err_t init() {
   }
 
   {
-    ESP_LOGI(TAG, "Loading system base config...");
+    ESP_LOGD(TAG, "Loading system base config...");
     std::string config_path(ZW_SYSTEM_MOUNT_POINT);
     config_path.append(BASE_CONFIG_PATH);
     ESP_RETURN_ON_ERROR(_load_config(config_path, app_config_));
@@ -559,7 +578,7 @@ esp_err_t init() {
 #endif
   }
   {
-    ESP_LOGI(TAG, "Loading live config...");
+    ESP_LOGD(TAG, "Loading live config...");
     std::string config_path(ZW_STORAGE_MOUNT_POINT);
     config_path.append(LIVE_CONFIG_PATH);
     if (_load_config(config_path, app_config_) != ESP_OK) {

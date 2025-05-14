@@ -106,28 +106,20 @@
         <table>
           <tbody>
             <tr>
-              <td class="vert-label">
-                <label for="ssid">SSID: </label>
-              </td>
-              <td>
-                <input type="text" id="ssid" name="ssid" value="test-ssid" maxlength="31" required>
-              </td>
+              <td><label for="ssid">SSID:</label></td>
+              <td><input type="text" id="ssid" name="ssid" value="test-ssid" maxlength="31" required></td>
             </tr>
             <tr>
-              <td class="vert-label">
-                <label for="password">Password: </label>
-              </td>
-              <td>
-                <span id="password-wrap">
-                  <input type="password" id="password" name="password" maxlength="31" value="test-password">
-                  <input type="checkbox" id="reveal-passwd" class="embedded" title="Reveal password">
-                </span>
+              <td><label for="password">Password: </label></td>
+              <td class="nowrap">
+                <input type="password" id="password" name="password" maxlength="31" value="test-password" disabled>
+                <input type="checkbox" id="reveal-passwd" class="embedded" title="Reveal password">
               </td>
             </tr>
           </tbody>
         </table>
         <div class="controls">
-          <input type="button" id="btn-rescan" value="Re-scan">
+          <input type="button" id="btn-rescan" value="Re-scan" disabled>
           <input type="submit" id="btn-apply" value="Apply">
         </div>
       </form>

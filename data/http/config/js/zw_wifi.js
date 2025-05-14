@@ -23,7 +23,8 @@ function send_credential(evt) {
     "password": passwd_box.val()
   };
   $("#btn-apply").prop('disabled', true);
-  $.post({
+  $.ajax({
+    type: "PUT",
     url: URL_STA_CONFIG,
     data: JSON.stringify(payload),
     contentType: 'application/json'

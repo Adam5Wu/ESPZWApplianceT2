@@ -6,6 +6,11 @@
 #include <string_view>
 #include <unordered_map>
 #include <memory>
+#include <optional>
+#include <functional>
+
+#include "esp_err.h"
+#include "esp_log.h"
 
 #include "cJSON.h"
 #include "lwip/ip_addr.h"
@@ -50,7 +55,11 @@ struct AppConfig {
 
   struct Time {
     // Optional UTC time to set as the baseline when the appliance boots up.
+    // Format: YYYY-MM-DD HH:MM:SS
     std::string baseline;
+
+    // POSIX TZ string for timezone specification
+    std::string timezone;
 
     // Optional NTP server address to sync time from (if connected to AP).
     std::string ntp_server;
@@ -191,8 +200,8 @@ utils::DataOrError<T> decode_enum(const char* str) {
   extern esp_err_t parse_##func_name(const cJSON* json, type& config, bool strict = false)
 
 DEFINE_PARSE_FUNC(AppConfig::Wifi::Station, wifi_station);
+DEFINE_PARSE_FUNC(AppConfig::Time, time);
 // DEFINE_PARSE_FUNC(AppConfig::Wifi::Ap, wifi_ap);
-// DEFINE_PARSE_FUNC(AppConfig::Time, time);
 #undef DEFINE_PARSE_FUNC
 
 //------------------------------
@@ -223,11 +232,10 @@ extern esp_err_t diff_and_marshal_field(utils::AutoReleaseRes<cJSON*>& container
   return ESP_OK;
 }
 
-template <typename T>
+template <typename T, typename MarshalFuncType>
 extern esp_err_t marshal_config_obj(utils::AutoReleaseRes<cJSON*>& container, const char* field,
                                     const T& base, const T& update,
-                                    esp_err_t (*marshal)(utils::AutoReleaseRes<cJSON*>&, const T&,
-                                                         const T&)) {
+                                    const MarshalFuncType& marshal) {
   utils::AutoReleaseRes<cJSON*> _node;
   if (esp_err_t err = marshal(_node, base, update); err != ESP_OK) return err;
   if (*_node != NULL) {
@@ -268,9 +276,36 @@ std::string encode_enum(const T& val) {
 #define DEFINE_MARSHAL_FUNC(type, func_name) \
   extern esp_err_t marshal_##func_name(utils::AutoReleaseRes<cJSON*>& json, type& config)
 
-// DEFINE_MARSHAL_FUNC(AppConfig::Time, time);
+DEFINE_MARSHAL_FUNC(AppConfig::Time, time);
 // DEFINE_MARSHAL_FUNC(AppConfig::Wifi::Ap, wifi_ap);
 #undef DEFINE_MARSHAL_FUNC
+
+struct GenericFieldHandler {
+  std::function<esp_err_t(const cJSON*, AppConfig&, bool)> parse;
+  std::function<void(const AppConfig&)> log;
+  std::function<esp_err_t(utils::AutoReleaseRes<cJSON*>&, const AppConfig&, const AppConfig&)>
+      marshal;
+};
+extern esp_err_t register_field(const std::string& key, GenericFieldHandler&& handler);
+
+template <typename ConfigType>
+esp_err_t register_custom_field(
+    const std::string& key, ConfigType& (*field_getter)(AppConfig& config),
+    esp_err_t (*parse)(const cJSON*, ConfigType&, bool), void (*log)(const ConfigType&),
+    esp_err_t (*marshal)(utils::AutoReleaseRes<cJSON*>&, const ConfigType&, const ConfigType&)) {
+  return register_field(
+      key,
+      GenericFieldHandler{
+          [=](const cJSON* json, AppConfig& config, bool strict) {
+            return parse(json, field_getter(config), strict);
+          },
+          [=](const AppConfig& config) { log(field_getter(const_cast<AppConfig&>(config))); },
+          [=](utils::AutoReleaseRes<cJSON*>& json, const AppConfig base, const AppConfig& update) {
+            return marshal(json, field_getter(const_cast<AppConfig&>(base)),
+                           field_getter(const_cast<AppConfig&>(update)));
+          },
+      });
+}
 
 }  // namespace zw::esp8266::app::config
 

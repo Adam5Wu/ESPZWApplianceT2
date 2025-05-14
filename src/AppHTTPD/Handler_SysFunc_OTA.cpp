@@ -124,13 +124,9 @@ esp_err_t _ota_data(httpd_req_t* req) {
     ota_in_progress_ = true;
     utils::AutoRelease ota_cleanup([&] {
       ota_in_progress_ = false;
-      if (esp_ota_end(ota_handle) == ESP_OK) {
-        if (esp_ota_set_boot_partition(ota_part) == ESP_OK) {
-          eventmgr::system_event_post(ZW_SYSTEM_EVENT_BOOT_IMAGE_ALT);
-          eventmgr::system_states_set(ZW_SYSTEM_STATE_BOOT_IMAGE_ALT);
-        } else {
-          ESP_LOGW(TAG, "Failed to set boot partition");
-        }
+      if (esp_ota_end_ex(ota_handle, true) == ESP_OK) {
+        eventmgr::system_event_post(ZW_SYSTEM_EVENT_BOOT_IMAGE_ALT);
+        eventmgr::system_states_set(ZW_SYSTEM_STATE_BOOT_IMAGE_ALT);
       } else {
         ESP_LOGW(TAG, "Failed to finalize OTA");
       }

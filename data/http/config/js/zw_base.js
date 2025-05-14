@@ -1,13 +1,16 @@
-const ZWBASE_VERSION = "1.0.4"
+const ZWBASE_VERSION = "1.1.0"
 
 const URL_BOOT_SERIAL = "/!sys/boot_serial";
 
 //----------------------------------------
-// System Management utility functions
-const STATUS_PROBE_INTERVAL = 3000;
+// Utility functions
+const PROBE_DEFAULT_RETRY = 5;
+const PROBE_STATUS_INTERVAL = 3000;
 
 function probe_url_for(url, success_action, fail_action, extra_opt) {
-  var options = $.extend({}, extra_opt);
+  var options = $.extend({
+    retry: PROBE_DEFAULT_RETRY,
+  }, extra_opt);
   var prob_container = {
     attempt: 0,
     timer: null,
@@ -19,7 +22,7 @@ function probe_url_for(url, success_action, fail_action, extra_opt) {
       if (options['always']) options['always'](options['data']);
     },
     action: function () {
-      this.attempt++;
+      const action_attempt = ++this.attempt;
       $.when(this.xhr).then(function (payload) {
         console.log(`Probe '${url}' succeeded:`, payload);
         success_action(payload, options['data']);
@@ -35,8 +38,8 @@ function probe_url_for(url, success_action, fail_action, extra_opt) {
         console.log(`Probe '${url}' failed (#${prob_container['attempt']}): ${resp_text || textStatus}`);
 
         // Keep retrying if no response text (likely timed out)
-        if (resp_text) {
-          fail_action(resp_text, ['data']);
+        if (resp_text || action_attempt >= options['retry']) {
+          fail_action(resp_text || `Request failed after ${action_attempt} attempts.`, ['data']);
           if (options['always']) options['always'](options['data']);
           return;
         }
@@ -45,7 +48,7 @@ function probe_url_for(url, success_action, fail_action, extra_opt) {
           prob_container['timer'] = null;
           prob_container['xhr'] = $.get(url);
           prob_container['action'].apply(prob_container);
-        }, STATUS_PROBE_INTERVAL);
+        }, PROBE_STATUS_INTERVAL);
       });
     }
   };
@@ -148,6 +151,9 @@ function dialog_confirm_prompt(dialog, message, action, extra_opt) {
   var dialog_msg = dialog.find(".dlg-message");
   dialog_msg.html(message);
   dialog.showModal();
+  dialog.on("keydown", function (evt) {
+    if (evt.which == 27) evt.preventDefault();
+  });
   dialog.on("close", function () {
     dialog.off(); dialog_op_confirm_action(dialog, action, options);
   });
@@ -173,9 +179,8 @@ function dialog_op_confirm_action(dialog, action, options) {
   } else if (dialog_action == "cancel") {
     console.log("Action cancelled by user.");
     if (options['onabort']) options['onabort'](options['data']);
-  } else {
-    console.warn(`Unexpected dialog close action: ${dialog_action}`);
   }
+  if (options['always']) options['always'](options['data']);
 }
 
 $(function () {
@@ -206,4 +211,14 @@ $(function () {
     dialog.find("input[type=reset]").click(
       function () { dialog_op_cancel(dialog); });
   });
+
+  // Extend JQueryUI Slider to take `pagecount`
+  if ($.ui) {
+    $.widget("ui.slider", $.ui.slider, {
+      _create: function () {
+        this._super();
+        this.numPages = this.options["pagecount"] || this.numPages;
+      }
+    });
+  }
 });
