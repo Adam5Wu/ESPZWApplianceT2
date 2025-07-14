@@ -278,9 +278,10 @@ esp_err_t _station_try_connect(const AppConfig::Wifi::Station& config) {
     ESP_RETURN_ON_ERROR(esp_wifi_disconnect());
   }
 
-  utils::AutoReleaseRes<EventGroupHandle_t> station_events(xEventGroupCreate(), [](EventGroupHandle_t h) {
-    if (h) vEventGroupDelete(h);
-  });
+  utils::AutoReleaseRes<EventGroupHandle_t> station_events(xEventGroupCreate(),
+                                                           [](EventGroupHandle_t h) {
+                                                             if (h) vEventGroupDelete(h);
+                                                           });
   if (*station_events == NULL) {
     ESP_LOGE(TAG, "Failed to allocate station event group");
     return ESP_FAIL;
@@ -498,8 +499,8 @@ esp_err_t _wifi_init(void) {
   // Not needed, already disabled via `wifi_config.nvs_enable`.
   // ESP_RETURN_ON_ERROR(esp_wifi_set_storage(WIFI_STORAGE_RAM));
 
+  auto config = config::get()->wifi;
   {
-    auto config = config::get()->wifi;
     if (config.power_saving) {
       ESP_LOGD(TAG, "Enable power saving...");
       ESP_RETURN_ON_ERROR(esp_wifi_set_ps(WIFI_PS_MIN_MODEM));
@@ -525,6 +526,11 @@ esp_err_t _wifi_init(void) {
   // Bring up the station interface to set hostname
   ESP_RETURN_ON_ERROR(esp_wifi_set_mode(WIFI_MODE_STA));
   ESP_RETURN_ON_ERROR(esp_wifi_start());
+  if (config.enable_11n) {
+    ESP_LOGD(TAG, "Enable 802.11n support...");
+    ESP_RETURN_ON_ERROR(esp_wifi_set_protocol(
+        WIFI_IF_STA, WIFI_PROTOCOL_11B | WIFI_PROTOCOL_11G | WIFI_PROTOCOL_11N));
+  }
 
   ESP_LOGI(TAG, "Setting host name: %s", states_.APName.c_str());
   ESP_RETURN_ON_ERROR(tcpip_adapter_set_hostname(TCPIP_ADAPTER_IF_STA, states_.APName.c_str()));

@@ -136,6 +136,7 @@ esp_err_t _parse_wifi_station(const cJSON* json, AppConfig::Wifi::Station& conta
 
 esp_err_t _parse_wifi(const cJSON* json, AppConfig::Wifi& container, bool strict = false) {
   PARSE_AND_ASSIGN_FIELD(json, container, power_saving, bool_parser, strict);
+  PARSE_AND_ASSIGN_FIELD(json, container, enable_11n, bool_parser, strict);
   PARSE_CONFIG_OBJ(json, container, ap, wifi_ap, strict);
   PARSE_CONFIG_OBJ(json, container, station, wifi_station, strict);
   return ESP_OK;
@@ -245,6 +246,7 @@ void _log_wifi_station(const AppConfig::Wifi::Station& container) {
 void _log_wifi(const AppConfig::Wifi& container) {
   ESP_LOGI(TAG, "Wi-Fi:");
   ESP_LOGI(TAG, "- Power saving: %s", container.power_saving ? "Enabled" : "Disabled");
+  ESP_LOGI(TAG, "- Support 802.11n: %s", container.enable_11n ? "Enabled" : "Disabled");
   _log_wifi_ap(container.ap);
   _log_wifi_station(container.station);
 }
@@ -356,6 +358,7 @@ esp_err_t _marshal_wifi_station(utils::AutoReleaseRes<cJSON*>& container,
 esp_err_t _marshal_wifi(utils::AutoReleaseRes<cJSON*>& container, const AppConfig::Wifi& base,
                         const AppConfig::Wifi& update) {
   DIFF_AND_MARSHAL_FIELD(container, base, update, power_saving, bool_marshal);
+  DIFF_AND_MARSHAL_FIELD(container, base, update, enable_11n, bool_marshal);
   MARSHAL_CONFIG_OBJ(container, base, update, ap, wifi_ap);
   MARSHAL_CONFIG_OBJ(container, base, update, station, wifi_station);
   return ESP_OK;

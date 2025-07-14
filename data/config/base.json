@@ -1,6 +1,7 @@
 {
   "wifi": {
     "power_saving": true,
+    "enable_11n": true,
     "ap": {
       "ssid_prefix": null,
       "password": null,

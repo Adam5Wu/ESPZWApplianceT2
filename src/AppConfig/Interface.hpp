@@ -24,6 +24,9 @@ struct AppConfig {
   struct Wifi {
     // Whether enables power saving feature (may reduce throughput).
     bool power_saving;
+    // Whether enable 802.11n support
+    bool enable_11n;
+
     struct Ap {
       // The prefix of the SoftAP SSID.
       // Full SSID will contain a unique ID of the chip.
