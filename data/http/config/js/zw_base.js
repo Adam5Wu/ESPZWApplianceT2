@@ -1,4 +1,4 @@
-const ZWBASE_VERSION = "1.1.4"
+const ZWBASE_VERSION = "1.1.5"
 
 const URL_BOOT_SERIAL = "/!sys/boot_serial";
 
@@ -62,14 +62,14 @@ function get_locale_weekday_map(formatter) {
   for (var idx = 0; idx < 7; idx++) {
     const sample_time = new Date(Date.UTC(2025, 0, 10 + idx));
     const sample_text = formatter.format(sample_time);
-    weekdays[sample_time.getDay()] = sample_text;
+    weekdays[sample_time.getUTCDay()] = sample_text;
   }
   return weekdays;
 }
 
 function get_locale_weekday_list(locale, style = "short") {
   const formatter = Intl.DateTimeFormat(locale, {
-    calendar: "gregory", weekday: style
+    calendar: "gregory", timeZone: "UTC", weekday: style
   });
   const weekdays = get_locale_weekday_map(formatter);
 
@@ -85,7 +85,7 @@ function get_locale_weekday_list(locale, style = "short") {
 
 function get_locale_month_list(locale, style = "short") {
   const formatter = Intl.DateTimeFormat(locale, {
-    calendar: "gregory", month: style
+    calendar: "gregory", timeZone: "UTC", month: style
   });
 
   var month_list = [];

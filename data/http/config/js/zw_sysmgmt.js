@@ -186,7 +186,7 @@ function prep_time_change_info(date, adjust, formatter, weekday_map) {
   const pre_date = new Date(date.getTime() - 1);
   const pre_date_parts = formatter.formatToParts(pre_date);
   var month_idx = Math.floor(pre_date_parts.find(part => part.type == 'month').value) - 1;
-  var week_idx = Math.floor(Number(pre_date_parts.find(part => part.type == 'day').value) / 7);
+  var week_idx = Math.floor((Number(pre_date_parts.find(part => part.type == 'day').value) - 1) / 7);
   var dow = weekday_map[pre_date_parts.find(part => part.type == 'weekday').value];
   var at_min = Number(pre_date_parts.find(part => part.type == 'minute').value) + 1;
 
@@ -196,7 +196,7 @@ function prep_time_change_info(date, adjust, formatter, weekday_map) {
   if (at_hour == 24 && adjust > 0) {
     const at_date_parts = formatter.formatToParts(date);
     month_idx = Math.floor(at_date_parts.find(part => part.type == 'month').value) - 1;
-    week_idx = Math.floor(Number(at_date_parts.find(part => part.type == 'day').value) / 7);
+    week_idx = Math.floor((Number(at_date_parts.find(part => part.type == 'day').value) - 1) / 7);
     dow = weekday_map[at_date_parts.find(part => part.type == 'weekday').value];
     at_hour = 0;
   }
@@ -243,8 +243,8 @@ function resolve_tz(timezone, utils) {
 
   // Heuristically detect daylight saving
   const solstices = [
-    { time: new Date(Date.UTC(currentYear - 1, 12, 21)), tz: {} },
-    { time: new Date(Date.UTC(currentYear, 6, 21)), tz: {} }
+    { time: new Date(Date.UTC(currentYear - 1, 11, 21)), tz: {} },
+    { time: new Date(Date.UTC(currentYear, 5, 21)), tz: {} }
   ];
 
   var winter = solstices[0];
@@ -258,7 +258,7 @@ function resolve_tz(timezone, utils) {
     return null;
   }
 
-  summer = solstices[1];
+  var summer = solstices[1];
   summer.tz = resolve_tz_info(formatters, summer.time);
   if (!summer.tz) return null;
 
@@ -266,6 +266,9 @@ function resolve_tz(timezone, utils) {
   if (winter.tz.offset[1] > summer.tz.offset[1]) {
     winter = solstices[1];
     summer = solstices[0];
+    summer.time.setUTCFullYear(summer.time.getUTCFullYear() + 1);
+    summer.tz = resolve_tz_info(formatters, summer.time);
+    if (!summer.tz) return null;
   }
 
   var tz_info = {
@@ -293,7 +296,8 @@ function resolve_tz(timezone, utils) {
 
     // Probe switching time
     const start_time = probe_offset_change(winter.time, summer.time, winter.tz.offset[0], formatters.offset);
-    const next_winter_time = new Date(new Date(winter.time).setFullYear(winter.time.getFullYear() + 1));
+    const next_winter_time = new Date(winter.time);
+    next_winter_time.setUTCFullYear(winter.time.getUTCFullYear() + 1);
     const end_time = probe_offset_change(summer.time, next_winter_time, summer.tz.offset[0], formatters.offset);
 
     const switch_time_formatter = new Intl.DateTimeFormat(undefined, {
@@ -338,7 +342,7 @@ function get_tz_string(tz_info) {
       tz_string += '/' + print_time_offset(dst_start.trigger, { no_plus: true, whole_hr: true });
     }
     const dst_end = tz_info.dst_switch[1];
-    const dst_end_weeknum = dst_start.week_idx + 1;
+    const dst_end_weeknum = dst_end.week_idx + 1;
     tz_string += `,M${dst_end.month_idx + 1}.${dst_end_weeknum || 5}.${dst_end.dow}`;
     if (dst_end.trigger != 120) {
       tz_string += '/' + print_time_offset(dst_end.trigger, { no_plus: true, whole_hr: true });
@@ -354,7 +358,7 @@ function parse_time_offset(offset_str) {
   const offset_parts = offset_str.split(':', 2);
   const ofs_hr = Number(offset_parts[0]);
   const ofs_min = offset_parts[1] ? Number(offset_parts[1]) : 0;
-  return ofs_hr * 60 + (ofs_hr < 0 ? -ofs_min : ofs_min);
+  return ofs_hr * 60 + (offset_parts[0].trim().startsWith('-') ? -ofs_min : ofs_min);
 }
 
 function parse_time_change_desc(switch_str) {
