@@ -1,4 +1,8 @@
 {
+  "identity": {
+    "hostname": null,
+    "location": null
+  },
   "wifi": {
     "power_saving": true,
     "enable_11n": true,

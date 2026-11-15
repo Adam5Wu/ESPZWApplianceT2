@@ -1,6 +1,7 @@
-const ZWBASE_VERSION = "1.1.5"
+const ZWBASE_VERSION = "1.1.6"
 
 const URL_BOOT_SERIAL = "/!sys/boot_serial";
+const URL_DISCOVER = "/!sys/discover";
 
 //----------------------------------------
 // Utility functions

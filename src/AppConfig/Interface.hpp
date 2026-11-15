@@ -21,6 +21,15 @@
 namespace zw::esp8266::app::config {
 
 struct AppConfig {
+  struct Identity {
+    // Optional single-label RFC 1123 hostname override (1-32 chars).
+    // Empty uses the auto-derived '<Appliance>-<6hex>' hostname.
+    std::string hostname;
+
+    // Optional human-readable physical location (0-64 UTF-8 bytes).
+    std::string location;
+  } identity;
+
   struct Wifi {
     // Whether enables power saving feature (may reduce throughput).
     bool power_saving;
@@ -193,6 +202,8 @@ DEFINE_DECODE_UTIL(long, long_int);
 DEFINE_DECODE_UTIL(int16_t, short_int);
 DEFINE_DECODE_UTIL(int8_t, byte_int);
 DEFINE_DECODE_UTIL(std::optional<ip_addr_t>, netmask);
+DEFINE_DECODE_UTIL(std::string, hostname);
+DEFINE_DECODE_UTIL(std::string, location);
 
 #undef DEFINE_DECODE_UTIL
 
@@ -207,6 +218,7 @@ utils::DataOrError<T> decode_enum(const char* str) {
 #define DEFINE_PARSE_FUNC(type, func_name) \
   extern esp_err_t parse_##func_name(const cJSON* json, type& config, bool strict = false)
 
+DEFINE_PARSE_FUNC(AppConfig::Identity, identity);
 DEFINE_PARSE_FUNC(AppConfig::Wifi::Station, wifi_station);
 DEFINE_PARSE_FUNC(AppConfig::Time, time);
 // DEFINE_PARSE_FUNC(AppConfig::Wifi::Ap, wifi_ap);
@@ -287,6 +299,7 @@ std::string encode_enum(const T& val) {
 #define DEFINE_MARSHAL_FUNC(type, func_name) \
   extern esp_err_t marshal_##func_name(utils::AutoReleaseRes<cJSON*>& json, type& config)
 
+DEFINE_MARSHAL_FUNC(AppConfig::Identity, identity);
 DEFINE_MARSHAL_FUNC(AppConfig::Time, time);
 // DEFINE_MARSHAL_FUNC(AppConfig::Wifi::Ap, wifi_ap);
 #undef DEFINE_MARSHAL_FUNC

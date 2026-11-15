@@ -1,5 +1,7 @@
 var DEVMODE = window.location.protocol === 'file:';
 var BOOT_SERIAL;
+var DISCOVER_INFO;
+var DEFAULT_HOSTNAME;
 
 //-----------------------
 // Reboot
@@ -142,8 +144,183 @@ function do_storage_user_reset() {
 }
 
 //-----------------------
-// Time Setup
+// Identity Setup
 const URL_CONFIG = "/!sys/config";
+const CONFIG_SECTION_IDENTITY = "identity";
+const UTF8_ENCODER = new TextEncoder();
+
+function validate_hostname(str) {
+  if (typeof str !== 'string') return "Invalid hostname value.";
+  if (str.length === 0) return null;
+  if (str.length > 32) {
+    return "Hostname must be at most 32 characters.";
+  }
+  if (!/^[A-Za-z0-9]/.test(str) || !/[A-Za-z0-9]$/.test(str)) {
+    return "Hostname must start and end with a letter or digit.";
+  }
+  if (!/^[A-Za-z0-9-]+$/.test(str)) {
+    return "Hostname may only contain ASCII letters (A-Z, a-z), digits (0-9), and hyphens (-).";
+  }
+  if (!/[A-Za-z]/.test(str)) {
+    return "Hostname must contain at least one letter (cannot be all digits).";
+  }
+  return null;
+}
+
+function validate_location(str) {
+  if (typeof str !== 'string') return "Invalid location value.";
+  if (/[\x00-\x1F\x7F]/.test(str)) {
+    return "Location cannot contain control characters.";
+  }
+  if (UTF8_ENCODER.encode(str).length > 64) {
+    return "Location must be at most 64 UTF-8 bytes.";
+  }
+  return null;
+}
+
+function update_hostname_validity() {
+  const input = $("#config-identity-hostname");
+  input.toggleClass("invalid", validate_hostname(input.val().trim()) !== null);
+}
+
+function update_location_validity() {
+  const input = $("#config-identity-location");
+  input.toggleClass("invalid", validate_location(input.val().trim()) !== null);
+}
+
+function init_identity_config_dialog() {
+  $("#config-identity-hostname").on('input change', update_hostname_validity);
+  $("#config-identity-location").on('input change', update_location_validity);
+}
+
+function identity_setup_validate() {
+  const hostnameInput = $("#config-identity-hostname");
+  const hostnameErr = validate_hostname(hostnameInput.val().trim());
+  if (hostnameErr) {
+    hostnameInput.addClass("invalid");
+    notify_prompt(`<p>${hostnameErr}`, function () {
+      hostnameInput.trigger('focus');
+    });
+    return false;
+  }
+
+  const locationInput = $("#config-identity-location");
+  const locationErr = validate_location(locationInput.val().trim());
+  if (locationErr) {
+    locationInput.addClass("invalid");
+    notify_prompt(`<p>${locationErr}`, function () {
+      locationInput.trigger('focus');
+    });
+    return false;
+  }
+  return true;
+}
+
+function identity_setup_save() {
+  const DIALOG = $("#config\\:identity");
+  var config = DIALOG.data('config');
+
+  const prev_hostname = config['hostname'] || '';
+  const new_hostname = $("#config-identity-hostname").val().trim();
+  const new_location = $("#config-identity-location").val().trim();
+  const hostname_changed = prev_hostname !== new_hostname;
+
+  config['hostname'] = new_hostname;
+  config['location'] = new_location;
+  console.log("Saving identity configuration:", config);
+
+  if (DEVMODE) {
+    if (DISCOVER_INFO && DISCOVER_INFO.identity) {
+      DISCOVER_INFO.identity.hostname = new_hostname || DEFAULT_HOSTNAME || "ZWBase-bba2f1";
+      DISCOVER_INFO.identity.location = new_location;
+    }
+    if (hostname_changed) {
+      confirm_prompt("<p>Configuration updated.<p>Reboot now to renew DHCP hostname?", do_reboot);
+    } else {
+      notify_prompt("<p>Configuration updated.");
+    }
+    return;
+  }
+
+  $.ajax({
+    method: "PUT",
+    url: URL_CONFIG + '?' + $.param({ "section": CONFIG_SECTION_IDENTITY }),
+    data: JSON.stringify(config),
+    contentType: 'application/json',
+  }).done(function () {
+    $.get(URL_DISCOVER, function (discover) {
+      DISCOVER_INFO = discover;
+      if (!new_hostname && discover && discover.identity) {
+        DEFAULT_HOSTNAME = discover.identity.hostname;
+      }
+    });
+    if (hostname_changed) {
+      confirm_prompt("<p>Configuration updated.<p>Reboot now to renew DHCP hostname?", do_reboot);
+    } else {
+      notify_prompt("<p>Configuration updated.");
+    }
+  }).fail(function (jqXHR, textStatus) {
+    var resp_text = (typeof jqXHR.responseText !== 'undefined') ? jqXHR.responseText : textStatus;
+    notify_prompt(`<p>Configuration update failed: ${resp_text}`);
+  });
+}
+
+function identity_setup_dialog_open(config) {
+  if (!config['hostname'] && DISCOVER_INFO && DISCOVER_INFO.identity && DISCOVER_INFO.identity.hostname) {
+    DEFAULT_HOSTNAME = DISCOVER_INFO.identity.hostname;
+  }
+
+  const hostnameInput = $("#config-identity-hostname");
+  hostnameInput.removeClass("invalid");
+  hostnameInput.attr('placeholder', DEFAULT_HOSTNAME ? `${DEFAULT_HOSTNAME} (auto)` : '(auto)');
+  hostnameInput.val(config['hostname'] || '');
+
+  const locationInput = $("#config-identity-location");
+  locationInput.removeClass("invalid");
+  locationInput.val(config['location'] || '');
+
+  const DIALOG = $("#config\\:identity");
+  DIALOG.data('config', config);
+  dialog_confirm_prompt(DIALOG, undefined, identity_setup_save, {
+    presubmit: identity_setup_validate
+  });
+}
+
+const DEBUG_DISCOVER_INFO = {
+  "boot_serial": "DEADBEEF",
+  "identity": {
+    "mac": "18:FE:34:A3:5C:C5",
+    "hostname": "ZWBase-bba2f1",
+    "location": "Workbench"
+  },
+  "firmware": {
+    "name": "ESP8266Base",
+    "version": "1.1.11",
+    "build_time": "May 01 2025 10:00:00"
+  }
+};
+
+const DEBUG_CONFIG_IDENTITY = {
+  "location": "Workbench"
+};
+
+function identity_setup_click() {
+  const DIALOG = $("#config\\:identity");
+  if (!DIALOG.data('init')) {
+    init_identity_config_dialog();
+    DIALOG.data('init', true);
+  }
+
+  if (DEVMODE) return identity_setup_dialog_open($.extend({}, DEBUG_CONFIG_IDENTITY));
+
+  probe_url_for(URL_CONFIG + '?' + $.param({ "section": CONFIG_SECTION_IDENTITY }),
+    identity_setup_dialog_open, function (text) {
+      notify_prompt(`<p>Configuration unavailable:<br>${text}`);
+    });
+}
+
+//-----------------------
+// Time Setup
 const CONFIG_SECTION_TIME = "time";
 const CONFIG_TIME_DEFAULT_NTP_SERVER = "pool.ntp.org";
 
@@ -878,6 +1055,7 @@ function storage_system_mgmt_card(card) {
 }
 
 $(function () {
+  $("#identity-setup").click(identity_setup_click);
   $("#time-setup").click(time_setup_click);
   $("#reboot").click(reboot_click);
 
@@ -890,13 +1068,26 @@ $(function () {
     $("#page-content>.card-space>.card").addClass('disabled');
     $("#page-content>.card-space>.card").removeClass('prog-test');
 
-    probe_url_for(URL_BOOT_SERIAL, enable_mgmt_functions, function (text) {
-      notify_prompt(`<p>System management feature unavailable: ${text}`);
-    });
+    probe_url_for(URL_DISCOVER, function (discover) {
+      DISCOVER_INFO = discover;
+      enable_mgmt_functions(discover.boot_serial);
+    }, function () {
+      probe_url_for(URL_BOOT_SERIAL, function (boot_serial) {
+        enable_mgmt_functions(boot_serial);
+        $("#identity-setup").addClass('disabled');
+      }, function (text) {
+        notify_prompt(`<p>System management feature unavailable: ${text}`);
+      });
+    }, { retry: 2 });
   } else {
-    BOOT_SERIAL = "DEADBEEF";
+    DISCOVER_INFO = DEBUG_DISCOVER_INFO;
+    DEFAULT_HOSTNAME = DEBUG_DISCOVER_INFO.identity.hostname;
+    BOOT_SERIAL = DEBUG_DISCOVER_INFO.boot_serial;
     $("#storage-system").removeClass('hidden');
     $("#storage-system").addClass('disabled');
+    init_identity_config_dialog();
+    $("#config\\:identity").data('init', true);
     init_time_config_dialog();
+    $("#config\\:time").data('init', true);
   }
 });

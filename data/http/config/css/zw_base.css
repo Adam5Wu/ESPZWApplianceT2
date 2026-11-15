@@ -82,6 +82,18 @@
     border-color: silver;
   }
 
+  select.invalid,
+  textarea.invalid,
+  input.invalid {
+    border-color: lightcoral;
+    box-shadow: 0 0 0.4em indianred;
+  }
+
+  textarea::placeholder,
+  input::placeholder {
+    color: darkslategray;
+  }
+
   option:disabled {
     background-color: darkgray;
     color: darkslategray;
@@ -408,6 +420,18 @@
     color: slategrey;
     background-color: darkgray;
     border-color: dimgray;
+  }
+
+  select.invalid,
+  textarea.invalid,
+  input.invalid {
+    border-color: crimson;
+    box-shadow: 0 0 0.4em lightcoral;
+  }
+
+  textarea::placeholder,
+  input::placeholder {
+    color: darkgray;
   }
 
   option:disabled {

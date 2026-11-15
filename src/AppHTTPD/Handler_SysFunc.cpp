@@ -7,6 +7,7 @@
 
 #include "esp_err.h"
 #include "esp_log.h"
+#include "esp_ota_ops.h"
 #include "esp_system.h"
 #include "esp_spi_flash.h"
 #include "esp_http_server.h"
@@ -14,7 +15,9 @@
 #include "ZWUtils.hpp"
 #include "ZWAppConfig.h"
 
+#include "AppConfig/Interface.hpp"
 #include "AppEventMgr/Interface.hpp"
+#include "AppNetwork/Interface.hpp"
 #include "AppStorage/Interface.hpp"
 
 #include "Interface.hpp"
@@ -79,6 +82,75 @@ bool sysfunc_boot_serial(const char* feature, httpd_req_t* req) {
 
     default:
       return false;
+  }
+  return true;
+}
+
+inline constexpr char FEATURE_DISCOVER[] = "/discover";
+
+#define CJSON_CHECK_NOT_NULL(expr) \
+  if ((expr) == nullptr) return ESP_ERR_NO_MEM
+
+esp_err_t _discover_create_response(utils::AutoReleaseRes<cJSON*>& resp) {
+  const esp_app_desc_t* desc = esp_ota_get_app_description();
+  if (desc == nullptr) return ESP_ERR_NOT_SUPPORTED;
+
+  ESP_RETURN_ON_ERROR(config::allocate_container(resp));
+  CJSON_CHECK_NOT_NULL(cJSON_AddStringToObject(*resp, "boot_serial", boot_serial_.c_str()));
+
+  {
+    std::string location = config::get()->identity.location;
+    cJSON* identity;
+    CJSON_CHECK_NOT_NULL(identity = cJSON_AddObjectToObject(*resp, "identity"));
+    CJSON_CHECK_NOT_NULL(cJSON_AddStringToObject(identity, "mac", network::StationMAC().c_str()));
+    CJSON_CHECK_NOT_NULL(cJSON_AddStringToObject(identity, "hostname", network::Hostname().c_str()));
+    CJSON_CHECK_NOT_NULL(cJSON_AddStringToObject(identity, "location", location.c_str()));
+  }
+
+  {
+    utils::DataBuf build_time(36);
+    const char* build_time_str = build_time.PrintTo("%s %s", desc->date, desc->time);
+    cJSON* firmware;
+    CJSON_CHECK_NOT_NULL(firmware = cJSON_AddObjectToObject(*resp, "firmware"));
+    CJSON_CHECK_NOT_NULL(cJSON_AddStringToObject(firmware, "name", desc->project_name));
+    CJSON_CHECK_NOT_NULL(cJSON_AddStringToObject(firmware, "version", desc->version));
+    CJSON_CHECK_NOT_NULL(cJSON_AddStringToObject(firmware, "build_time", build_time_str));
+  }
+
+  return ESP_OK;
+}
+
+#undef CJSON_CHECK_NOT_NULL
+
+esp_err_t _discover_get(httpd_req_t* req) {
+  utils::AutoReleaseRes<cJSON*> resp;
+  if (_discover_create_response(resp) != ESP_OK) {
+    return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR,
+                               "Failed to generate discover data");
+  }
+  return send_json(req, *resp);
+}
+
+bool sysfunc_discover(const char* feature, httpd_req_t* req) {
+  if (strncmp(feature, FEATURE_DISCOVER, utils::STRLEN(FEATURE_DISCOVER)) != 0) return false;
+
+  char next = feature[utils::STRLEN(FEATURE_DISCOVER)];
+  if (next != '\0' && next != '?' && next != URI_PATH_DELIM) return false;
+  if (next != '\0') {
+    httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Malformed request");
+    return true;
+  }
+
+  switch (req->method) {
+    case HTTP_GET:
+      if (esp_err_t err = _discover_get(req); err != ESP_OK) {
+        ESP_LOGW(TAG, "Discover request handler error: %d (0x%x)", err, err);
+      }
+      break;
+
+    default:
+      httpd_resp_send_err(req, HTTPD_405_METHOD_NOT_ALLOWED, "Feature does not accept this method");
+      break;
   }
   return true;
 }
@@ -310,7 +382,7 @@ bool sysfunc_storage(const char* feature, httpd_req_t* req) {
 }
 
 const std::vector<SysFuncHandler> subfunc_ = {
-    sysfunc_boot_serial, sysfunc_reboot, sysfunc_storage, sysfunc_config,
+    sysfunc_boot_serial, sysfunc_discover, sysfunc_reboot, sysfunc_storage, sysfunc_config,
 #ifdef ZW_APPLIANCE_COMPONENT_WEB_NET_PROVISION
     sysfunc_provision,
 #endif

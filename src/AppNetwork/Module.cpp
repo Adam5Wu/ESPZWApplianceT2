@@ -21,6 +21,7 @@
 #include "ZWAppConfig.h"
 #include "ZWAppUtils.hpp"
 
+#include "Interface.hpp"
 #include "Interface_Private.hpp"
 #include "CaptiveDNS.hpp"
 
@@ -44,24 +45,38 @@ using config::AppConfig;
 
 InternalStates states_;
 
+std::string _get_sta_mac(void) {
+  uint8_t mac[6] = {0};
+  if (esp_read_mac(mac, ESP_MAC_WIFI_STA) != ESP_OK) {
+    ESP_LOGW(TAG, "Failed to read station MAC address");
+    return "";
+  }
+  char mac_str[18];
+  snprintf(mac_str, sizeof(mac_str), "%02X:%02X:%02X:%02X:%02X:%02X", mac[0], mac[1], mac[2],
+           mac[3], mac[4], mac[5]);
+  return std::string(mac_str);
+}
+
+char chip_short_id_[7] = {0};
+
+const char* _chip_short_id(void) {
+  if (chip_short_id_[0] == '\0') {
+    uint8_t efuse_mac[6];
+    if (esp_efuse_mac_get_default(&efuse_mac[0]) == ESP_OK) {
+      snprintf(chip_short_id_, sizeof(chip_short_id_), "%02x%02x%02x",
+               efuse_mac[0] ^ efuse_mac[3], efuse_mac[1] ^ efuse_mac[4],
+               efuse_mac[2] ^ efuse_mac[5]);
+    } else {
+      snprintf(chip_short_id_, sizeof(chip_short_id_), "%06x", esp_random() & 0xffffff);
+      ESP_LOGD(TAG, "Fallback random short ID: %s", chip_short_id_);
+    }
+  }
+  return chip_short_id_;
+}
+
 std::string _get_ap_name(const AppConfig::Wifi::Ap& config) {
-  std::string result = config.ssid_prefix;
-  if (result.empty()) result = ZW_APPLIANCE_AP_PREFIX;
-  char id_str[7] = {0};
-
-  uint8_t efuse_mac[6];
-  ESP_GOTO_ON_ERROR(esp_efuse_mac_get_default(&efuse_mac[0]), random_id);
-  sprintf(&id_str[0], "%02x%02x%02x", efuse_mac[0] ^ efuse_mac[3], efuse_mac[1] ^ efuse_mac[4],
-          efuse_mac[2] ^ efuse_mac[5]);
-  result.append(&id_str[0]);
+  std::string result = DefaultHostname(config.ssid_prefix);
   ESP_LOGD(TAG, "Derived SoftAP SSID: %s", result.c_str());
-  return result;
-
-random_id:
-  uint32_t rand_str = esp_random();
-  sprintf(&id_str[0], "%06x", rand_str & 0xffffff);
-  result.append(&id_str[0]);
-  ESP_LOGD(TAG, "Fallback random SoftAP SSID: %s", result.c_str());
   return result;
 }
 
@@ -499,7 +514,13 @@ esp_err_t _wifi_init(void) {
   // Not needed, already disabled via `wifi_config.nvs_enable`.
   // ESP_RETURN_ON_ERROR(esp_wifi_set_storage(WIFI_STORAGE_RAM));
 
-  auto config = config::get()->wifi;
+  AppConfig::Wifi config;
+  std::string cfg_hostname;
+  {
+    auto app_cfg = config::get();
+    config = app_cfg->wifi;
+    cfg_hostname = app_cfg->identity.hostname;
+  }
   {
     if (config.power_saving) {
       ESP_LOGD(TAG, "Enable power saving...");
@@ -509,7 +530,9 @@ esp_err_t _wifi_init(void) {
     // Initialize sub-system state
     states_.flag_data = 0;
     states_.PROVISION = !config.station;
+    states_.StationMAC = _get_sta_mac();
     states_.APName = _get_ap_name(config.ap);
+    states_.Hostname = cfg_hostname.empty() ? states_.APName : std::move(cfg_hostname);
   }
 
 #ifdef ZW_APPLIANCE_COMPONENT_NET_CAPTIVE_DNS
@@ -532,8 +555,9 @@ esp_err_t _wifi_init(void) {
         WIFI_IF_STA, WIFI_PROTOCOL_11B | WIFI_PROTOCOL_11G | WIFI_PROTOCOL_11N));
   }
 
-  ESP_LOGI(TAG, "Setting host name: %s", states_.APName.c_str());
-  ESP_RETURN_ON_ERROR(tcpip_adapter_set_hostname(TCPIP_ADAPTER_IF_STA, states_.APName.c_str()));
+  ESP_LOGI(TAG, "Station MAC: %s", states_.StationMAC.c_str());
+  ESP_LOGI(TAG, "Setting host name: %s", states_.Hostname.c_str());
+  ESP_RETURN_ON_ERROR(tcpip_adapter_set_hostname(TCPIP_ADAPTER_IF_STA, states_.Hostname.c_str()));
 
   return ESP_OK;
 }
@@ -543,7 +567,25 @@ esp_err_t _wifi_init(void) {
 extern const InternalStates& internal_states(void) { return states_; }
 
 extern ip_addr_t StationIPAddr(void) { return states_.StationIPAddr; }
-extern const std::string& Hostname(void) { return states_.APName; }
+extern const std::string& StationMAC(void) { return states_.StationMAC; }
+extern const std::string& Hostname(void) { return states_.Hostname; }
+
+std::string DefaultHostname(const std::string& prefix) {
+  std::string result = prefix.empty() ? ZW_APPLIANCE_AP_PREFIX : prefix;
+  result.append(_chip_short_id());
+  return result;
+}
+
+esp_err_t RefreshHostname(void) {
+  std::string cfg_hostname = config::get()->identity.hostname;
+  std::string target = cfg_hostname.empty() ? states_.APName : std::move(cfg_hostname);
+  if (target == states_.Hostname) return ESP_OK;
+
+  ESP_LOGI(TAG, "Updating host name: %s", target.c_str());
+  ESP_RETURN_ON_ERROR(tcpip_adapter_set_hostname(TCPIP_ADAPTER_IF_STA, target.c_str()));
+  states_.Hostname = std::move(target);
+  return ESP_OK;
+}
 
 void ApplyStationConfig(void) {
   if (states_.PROVISION) {

@@ -145,6 +145,20 @@ ul.card-space li.card.dropzone input {
   z-index: -1;
 }
 
+#config\:identity .config-container>div+div {
+  margin-top: 0.5em;
+}
+
+#config\:identity label>span.align {
+  display: inline-block;
+  width: 5.2em;
+}
+
+#config\:identity input[type="text"] {
+  width: 15em;
+  max-width: calc(100vw - 10em);
+}
+
 #config-timezone-select {
   max-width: 16em;
 }

@@ -14,6 +14,7 @@
 #include "ZWAppConfig.h"
 
 #include "AppConfig/Interface.hpp"
+#include "AppNetwork/Interface.hpp"
 #include "AppTime/Interface.hpp"
 
 #include "Interface.hpp"
@@ -27,13 +28,16 @@ inline constexpr char FEATURE_PREFIX[] = "/config";
 #define URI_PATH_DELIM '/'
 
 inline constexpr char PARAM_SECTION[] = "section";
+inline constexpr char SECTION_IDENTITY[] = "identity";
 inline constexpr char SECTION_TIME[] = "time";
 
 using config::AppConfig;
 
 esp_err_t _config_get_section(const std::string& section_name, httpd_req_t* req) {
   utils::AutoReleaseRes<cJSON*> json;
-  if (section_name == SECTION_TIME) {
+  if (section_name == SECTION_IDENTITY) {
+    config::marshal_identity(json, config::get()->identity);
+  } else if (section_name == SECTION_TIME) {
     config::marshal_time(json, config::get()->time);
   } else {
     return httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, "Section not available");
@@ -51,7 +55,12 @@ esp_err_t _config_set_section(const std::string& section_name, httpd_req_t* req)
   utils::AutoReleaseRes<cJSON*> json;
   ESP_RETURN_ON_ERROR(receive_json(req, json));
 
-  if (section_name == SECTION_TIME) {
+  if (section_name == SECTION_IDENTITY) {
+    AppConfig::Identity identity = config::get()->identity;
+    ESP_GOTO_ON_ERROR(config::parse_identity(*json, identity, true), parse_failed);
+    config::get()->identity = std::move(identity);
+    ESP_GOTO_ON_ERROR(network::RefreshHostname(), refresh_failed);
+  } else if (section_name == SECTION_TIME) {
     AppConfig::Time time = config::get()->time;
     ESP_GOTO_ON_ERROR(config::parse_time(*json, time), parse_failed);
     config::get()->time = std::move(time);

@@ -15,11 +15,14 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "lwip/ip_addr.h"
+#include "tcpip_adapter.h"
 
 #include "cJSON.h"
 
 #include "ZWUtils.hpp"
 #include "ZWAppConfig.h"
+
+#include "AppNetwork/Interface.hpp"
 
 #include "Interface.hpp"
 
@@ -112,12 +115,75 @@ utils::DataOrError<std::optional<ip_addr_t>> _decode_netmask(const char* str) {
   return std::optional<ip_addr_t>(netmask);
 }
 
+inline constexpr size_t IDENTITY_LOCATION_MAX_SIZE = 64;
+
+inline bool _is_ascii_alpha(char c) {
+  return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z');
+}
+
+inline bool _is_ascii_alnum(char c) {
+  return _is_ascii_alpha(c) || (c >= '0' && c <= '9');
+}
+
+utils::DataOrError<std::string> _decode_hostname(const char* str) {
+  if (*str == '\0') return std::string();
+
+  size_t len = strlen(str);
+  if (len > TCPIP_HOSTNAME_MAX_SIZE || !_is_ascii_alnum(str[0]) ||
+      !_is_ascii_alnum(str[len - 1])) {
+    ESP_LOGD(TAG, "Hostname '%s' has invalid length or boundary", str);
+    return ESP_ERR_INVALID_ARG;
+  }
+
+  bool has_alpha = false;
+  for (size_t idx = 0; idx < len; ++idx) {
+    char c = str[idx];
+    if (_is_ascii_alpha(c)) {
+      has_alpha = true;
+    } else if (!_is_ascii_alnum(c) && c != '-') {
+      ESP_LOGD(TAG, "Hostname '%s' contains invalid char", str);
+      return ESP_ERR_INVALID_ARG;
+    }
+  }
+  if (!has_alpha) {
+    ESP_LOGD(TAG, "Hostname '%s' cannot be purely numeric", str);
+    return ESP_ERR_INVALID_ARG;
+  }
+  return std::string(str, len);
+}
+
+utils::DataOrError<std::string> _decode_location(const char* str) {
+  size_t len = strlen(str);
+  if (len > IDENTITY_LOCATION_MAX_SIZE) {
+    ESP_LOGD(TAG, "Location length %u exceeds max %u", (unsigned)len,
+             (unsigned)IDENTITY_LOCATION_MAX_SIZE);
+    return ESP_ERR_INVALID_ARG;
+  }
+  for (size_t idx = 0; idx < len; ++idx) {
+    uint8_t c = static_cast<uint8_t>(str[idx]);
+    if (c < 0x20 || c == 0x7F) {
+      ESP_LOGD(TAG, "Location contains control character 0x%02x", c);
+      return ESP_ERR_INVALID_ARG;
+    }
+  }
+  return std::string(str, len);
+}
+
 #define PARSE_CONFIG_OBJ(json, container, field, parse_name, strict) \
   ESP_RETURN_ON_ERROR(                                               \
       _parse_##parse_name(cJSON_GetObjectItem(json, #field), container.field, strict))
 
 #define PARSE_AND_ASSIGN_FIELD(json, container, field, parse_func, strict) \
   ESP_RETURN_ON_ERROR(parse_and_assign_field(json, #field, container.field, parse_func, strict))
+
+esp_err_t _parse_identity(const cJSON* json, AppConfig::Identity& container, bool strict = false) {
+  if (strict && !cJSON_IsObject(json)) return ESP_ERR_INVALID_ARG;
+  PARSE_AND_ASSIGN_FIELD(json, container, hostname,
+                         (string_decoder<std::string, _decode_hostname>), strict);
+  PARSE_AND_ASSIGN_FIELD(json, container, location,
+                         (string_decoder<std::string, _decode_location>), strict);
+  return ESP_OK;
+}
 
 esp_err_t _parse_wifi_ap(const cJSON* json, AppConfig::Wifi::Ap& container, bool strict = false) {
   PARSE_AND_ASSIGN_FIELD(json, container, ssid_prefix, string_parser, strict);
@@ -187,6 +253,7 @@ esp_err_t _parse(const char* data, AppConfig& container, bool strict) {
 
   AppConfig safe_copy = container;
   utils::AutoRelease failsafe([&] { container = std::move(safe_copy); });
+  PARSE_CONFIG_OBJ(*json, container, identity, identity, strict);
   PARSE_CONFIG_OBJ(*json, container, wifi, wifi, strict);
   PARSE_CONFIG_OBJ(*json, container, time, time, strict);
   PARSE_CONFIG_OBJ(*json, container, dev_mode, dev_mode, strict);
@@ -220,6 +287,18 @@ void _log_dev_mode(const AppConfig::DevMode& container) {
   std::string dev_mode_service;
   if (container.web_dav) APPEND_STRINGLIST(dev_mode_service, "WebDAV");
   ESP_LOGI(TAG, "Development mode: %s", STRING_VALUE_OR(dev_mode_service, "OFF"));
+}
+
+void _log_identity(const AppConfig::Identity& container, const std::string& ap_prefix) {
+  ESP_LOGI(TAG, "Identity:");
+  if (container.hostname.empty()) {
+    ESP_LOGI(TAG, "- Hostname: %s (auto)", network::DefaultHostname(ap_prefix).c_str());
+  } else {
+    ESP_LOGI(TAG, "- Hostname: %s", container.hostname.c_str());
+  }
+  if (!container.location.empty()) {
+    ESP_LOGI(TAG, "- Location: %s", container.location.c_str());
+  }
 }
 
 void _log_wifi_ap(const AppConfig::Wifi::Ap& container) {
@@ -292,6 +371,7 @@ void _log_http_server(const AppConfig::HttpServer& container) {
 void _log(const AppConfig& container) {
   ESP_LOGI(TAG, "------ Configurations ------");
   _log_dev_mode(container.dev_mode);
+  _log_identity(container.identity, container.wifi.ap.ssid_prefix);
   _log_wifi(container.wifi);
   _log_time(container.time);
   _log_http_server(container.http_server);
@@ -338,6 +418,13 @@ std::string _encode_netmask(const std::optional<ip_addr_t>& addr) {
 #define DIFF_AND_MARSHAL_FIELD(container, base, update, field, marshal_func) \
   ESP_RETURN_ON_ERROR(                                                       \
       diff_and_marshal_field(container, #field, base.field, update.field, marshal_func))
+
+esp_err_t _marshal_identity(utils::AutoReleaseRes<cJSON*>& container,
+                            const AppConfig::Identity& base, const AppConfig::Identity& update) {
+  DIFF_AND_MARSHAL_FIELD(container, base, update, hostname, string_marshal);
+  DIFF_AND_MARSHAL_FIELD(container, base, update, location, string_marshal);
+  return ESP_OK;
+}
 
 esp_err_t _marshal_wifi_ap(utils::AutoReleaseRes<cJSON*>& container,
                            const AppConfig::Wifi::Ap& base, const AppConfig::Wifi::Ap& update) {
@@ -405,6 +492,7 @@ esp_err_t _marshal_httpd(utils::AutoReleaseRes<cJSON*>& container,
 
 esp_err_t _marshal(utils::AutoReleaseRes<cJSON*>& container, const AppConfig& base,
                    const AppConfig& update) {
+  MARSHAL_CONFIG_OBJ(container, base, update, identity, identity);
   MARSHAL_CONFIG_OBJ(container, base, update, wifi, wifi);
   MARSHAL_CONFIG_OBJ(container, base, update, dev_mode, dev_mode);
   MARSHAL_CONFIG_OBJ(container, base, update, time, time);
@@ -550,6 +638,8 @@ EXPORT_DECODE_UTIL(long, long_int);
 EXPORT_DECODE_UTIL(int16_t, short_int);
 EXPORT_DECODE_UTIL(int8_t, byte_int);
 EXPORT_DECODE_UTIL(std::optional<ip_addr_t>, netmask);
+EXPORT_DECODE_UTIL(std::string, hostname);
+EXPORT_DECODE_UTIL(std::string, location);
 
 #undef EXPORT_DECODE_UTIL
 
@@ -558,6 +648,7 @@ EXPORT_DECODE_UTIL(std::optional<ip_addr_t>, netmask);
     return _parse_##func_name(json, config, strict);                          \
   }
 
+EXPORT_PARSE_FUNC(AppConfig::Identity, identity);
 EXPORT_PARSE_FUNC(AppConfig::Wifi::Station, wifi_station);
 EXPORT_PARSE_FUNC(AppConfig::Time, time);
 // EXPORT_PARSE_FUNC(AppConfig::Wifi::Ap, wifi_ap);
@@ -605,9 +696,12 @@ esp_err_t allocate_container(utils::AutoReleaseRes<cJSON*>& container) {
 
 #define EXPORT_MARSHAL_FUNC(type, func_name)                                         \
   esp_err_t marshal_##func_name(utils::AutoReleaseRes<cJSON*>& json, type& config) { \
-    return _marshal_##func_name(json, type(), config);                               \
+    ESP_RETURN_ON_ERROR(_marshal_##func_name(json, type(), config));                 \
+    if (*json == NULL) ESP_RETURN_ON_ERROR(allocate_container(json));                \
+    return ESP_OK;                                                                   \
   }
 
+EXPORT_MARSHAL_FUNC(AppConfig::Identity, identity);
 EXPORT_MARSHAL_FUNC(AppConfig::Time, time);
 // EXPORT_MARSHAL_FUNC(AppConfig::Wifi::Ap, wifi_ap);
 #undef EXPORT_MARSHAL_FUNC

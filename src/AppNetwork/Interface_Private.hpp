@@ -15,7 +15,9 @@ struct InternalStates {
       unsigned PROVISION : 1;
     };
   };
+  std::string StationMAC;
   std::string APName;
+  std::string Hostname;
   ip_addr_t StationIPAddr;
 };
 

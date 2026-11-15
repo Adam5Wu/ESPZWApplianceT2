@@ -21,6 +21,9 @@
 
     <div id="page-content">
       <ul class="card-space">
+        <li class="card" id="identity-setup">
+          <div class="card-icon woff-icon">&#x1F3F7;</div>Identity
+        </li>
         <li class="card" id="time-setup">
           <div class="card-icon woff-icon">&#x1F557;</div>Time
         </li>
@@ -45,6 +48,30 @@
     </div>
   </div>
   <iframe name="download-frame" class="hidden"></iframe>
+
+  <dialog class="config" id="config:identity">
+    <div class="dlg-header">
+      System Identity Setup
+    </div>
+    <div class="dlg-body config-container">
+      <div>
+        <label for="config-identity-hostname" class="nowrap">
+          <span class="align">Hostname:</span>
+          <input type="text" id="config-identity-hostname" maxlength="32" spellcheck="false" autocomplete="off">
+        </label>
+      </div>
+      <div>
+        <label for="config-identity-location" class="nowrap">
+          <span class="align">Location:</span>
+          <input type="text" id="config-identity-location" maxlength="64" placeholder="e.g. Living Room">
+        </label>
+      </div>
+    </div>
+    <form class="dlg-ctrl" method="dialog">
+      <input type="submit" value="Save">
+      <input type="reset" value="Discard">
+    </form>
+  </dialog>
 
   <dialog class="config" id="config:time">
     <div class="dlg-header">
