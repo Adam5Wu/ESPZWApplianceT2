@@ -1,5 +1,6 @@
 #include "Module.hpp"
 
+#include <inttypes.h>
 #include <string>
 #include <sys/stat.h>
 
@@ -159,7 +160,7 @@ void _httpd_task_event(int32_t event_id, void*, void*) {
       }
       break;
     default:
-      ESP_LOGW(TAG, "Unrecognized event %d", event_id);
+      ESP_LOGW(TAG, "Unrecognized event %" PRId32, event_id);
   }
 }
 

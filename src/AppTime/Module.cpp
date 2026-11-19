@@ -1,5 +1,6 @@
 #include "Module.hpp"
 
+#include <inttypes.h>
 #include <string.h>
 
 #include "esp_err.h"
@@ -160,8 +161,8 @@ std::string serving_ntp_server;
 
 void _sntp_sync_event(struct timeval* tv, int64_t delta) {
   std::string time_str = _print_time(*tv);
-  ESP_LOGI(TAG, "SNTP time: %s (delta %d.%03d sec)", time_str.c_str(), (int32_t)(delta / 1000000),
-           abs((int32_t)(delta % 1000000)) / 1000);
+  ESP_LOGI(TAG, "SNTP time: %s (delta %" PRId32 ".%03d sec)", time_str.c_str(),
+           static_cast<int32_t>(delta / 1000000), abs(static_cast<int>(delta % 1000000)) / 1000);
   eventmgr::system_states_set(ZW_SYSTEM_STATE_TIME_NTP_TRACKING);
   eventmgr::system_event_post(ZW_SYSTEM_EVENT_TIME_NTP_TRACKING);
 }
@@ -197,7 +198,7 @@ void _time_task(TimerHandle_t) {
       soc_restore_local_irq(flag);
     }
     int32_t delta_ms = delta / 1000;
-    ESP_LOGD(TAG, "Delta = %dms", delta_ms);
+    ESP_LOGD(TAG, "Delta = %" PRId32 "ms", delta_ms);
     eventmgr::system_states_set(ZW_SYSTEM_STATE_TIME_ALIGNED, delta_ms < 1000);
   }
 

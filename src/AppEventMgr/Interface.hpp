@@ -2,6 +2,7 @@
 #ifndef APPEVENTMGR_INTERFACE
 #define APPEVENTMGR_INTERFACE
 
+#include <inttypes.h>
 #include <string>
 
 #include "esp_system.h"
@@ -63,7 +64,7 @@ void SystemEventHandlerWrapper(void* handler_arg, esp_event_base_t event_base, i
                                void* event_data) {
   if (!IsSystemFailed()) {
     handler(event_id, event_data, handler_arg);
-    ESP_LOGD(TAG, "~> Heap: %d; Stack: %d", esp_get_free_heap_size(),
+    ESP_LOGD(TAG, "~> Heap: %" PRIu32 "; Stack: %u", esp_get_free_heap_size(),
              uxTaskGetStackHighWaterMark(NULL));
   }
 }

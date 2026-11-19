@@ -1,3 +1,4 @@
+#include <inttypes.h>
 #include <stdio.h>
 
 #include "esp_err.h"
@@ -59,12 +60,12 @@ void _greeting(void) {
              chip_info.cores > 1 ? "s" : "", CONFIG_ESP8266_DEFAULT_CPU_FREQ_MHZ);
 
     ESP_LOGI(TAG, "Silicon revision: %d", chip_info.revision);
-    ESP_LOGI(TAG, "%s flash: %dKB",
+    ESP_LOGI(TAG, "%s flash: %uKB",
              (chip_info.features & CHIP_FEATURE_EMB_FLASH) ? "Embedded" : "External",
              spi_flash_get_chip_size() / 1024);
   }
   ESP_LOGI(TAG, "SDK version: %s", esp_get_idf_version());
-  ESP_LOGI(TAG, "Free heap memory: %d", esp_get_free_heap_size());
+  ESP_LOGI(TAG, "Free heap memory: %" PRIu32, esp_get_free_heap_size());
   ESP_LOGI(TAG, "=============================");
 }
 
@@ -117,7 +118,7 @@ esp_err_t main(void) {
   ESP_RETURN_ON_ERROR(network::init());
   ESP_RETURN_ON_ERROR(httpd::init());
 
-  ESP_LOGD(TAG, "** Heap: %d; Stack: %d", esp_get_free_heap_size(),
+  ESP_LOGD(TAG, "** Heap: %" PRIu32 "; Stack: %u", esp_get_free_heap_size(),
            uxTaskGetStackHighWaterMark(NULL));
 
   // Adjust system state per config

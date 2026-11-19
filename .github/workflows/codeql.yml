@@ -12,7 +12,7 @@ on:
 
 jobs:
   analyze:
-    name: Analyze (${{ matrix.language }})
+    name: Analyze (${{ matrix.language }} / ${{ matrix.env }})
     runs-on: 'windows-latest'
     permissions:
       # required for all workflows
@@ -31,10 +31,16 @@ jobs:
         include:
         - language: c-cpp
           build-mode: manual
+          env: esp01_4m
+        - language: c-cpp
+          build-mode: manual
+          env: esp01_4m_gcc16
 
     steps:
     - name: Checkout Repository
-      uses: actions/checkout@v4
+      uses: actions/checkout@v7
+      with:
+        fetch-depth: 0
 
     - name: Generate Environment Variables
       run: |
@@ -49,7 +55,7 @@ jobs:
         ) >> $env:GITHUB_ENV
 
     - name: Initialize CodeQL
-      uses: github/codeql-action/init@v3
+      uses: github/codeql-action/init@v4
       with:
         # This "magic" string seems to trick the init script into using the
         # pre-cached version from the base image, which saves about 2 mins.
@@ -58,14 +64,14 @@ jobs:
         build-mode: ${{ matrix.build-mode }}
 
     - name: Set up Python
-      uses: actions/setup-python@v5
+      uses: actions/setup-python@v7
       with:
         python-version: '3.13'
 
     # Since there is no good way to detect PIP and PlatformIO updates
     # we just produced a weekly refreshed cache
     - name: Python Package Cache
-      uses: actions/cache@v3
+      uses: actions/cache@v6
       with:
         path: |
           ${{ env.LOCAL_APPDATA }}/pip/cache
@@ -82,23 +88,23 @@ jobs:
         pip install --upgrade platformio
 
     - name: PlatformIO Package Cache
-      uses: actions/cache@v3
+      uses: actions/cache@v6
       with:
         path: |
           ~/.platformio/packages
           ~/.platformio/penv
           ~/.platformio/platforms
-        key: ${{ runner.os }}-piopackage-${{ hashFiles('example/platformio.ini') }}
-        restore-keys: ${{ runner.os }}-piopackage-
+          .pio/libdeps/${{ matrix.env }}
+        key: ${{ runner.os }}-piopackage-${{ matrix.env }}-${{ env.WEEKLY_TAG }}-${{ hashFiles('platformio.ini') }}
 
     - if: ${{ github.event_name != 'schedule' }}
       name: PlatformIO Build Cache
-      uses: actions/cache@v3
+      uses: actions/cache@v6
       with:
         path: |
-          example/.pio
-        key: ${{ runner.os }}-piobuild-${{ github.sha }}
-        restore-keys: ${{ runner.os }}-piobuild-
+          .pio/build/${{ matrix.env }}
+        key: ${{ runner.os }}-piobuild-${{ matrix.env }}-${{ env.WEEKLY_TAG }}-${{ hashFiles('platformio.ini', 'sdkconfig.defaults') }}-${{ github.sha }}
+        restore-keys: ${{ runner.os }}-piobuild-${{ matrix.env }}-${{ env.WEEKLY_TAG }}-${{ hashFiles('platformio.ini', 'sdkconfig.defaults') }}-
 
     # Fix mtime so PlatformIO build cache will work
     - name: Restore Source Timestamps
@@ -106,9 +112,10 @@ jobs:
 
     - name: PlatformIO Build
       run: |
-        platformio run
-        
+        Remove-Item -Recurse -Force ".pio/build/${{ matrix.env }}/src" -ErrorAction SilentlyContinue
+        platformio run -e ${{ matrix.env }}
+
     - name: Perform CodeQL Analysis
-      uses: github/codeql-action/analyze@v3
+      uses: github/codeql-action/analyze@v4
       with:
-        category: "/language:${{matrix.language}}"
+        category: "/language:${{ matrix.language }}-${{ matrix.env }}"

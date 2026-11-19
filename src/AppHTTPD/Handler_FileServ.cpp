@@ -1,5 +1,6 @@
 #include "Handler_FileServ.hpp"
 
+#include <inttypes.h>
 #include <string>
 #include <unordered_map>
 
@@ -172,7 +173,8 @@ esp_err_t _handler_fileserv(httpd_req_t* req) {
     return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Failed to query file stat");
   }
   utils::DataBuf etag_buf(16);
-  const char* etag = etag_buf.PrintTo("%06lX:%08lX", st.st_size & 0xffffff, st.st_mtime);
+  const char* etag =
+      etag_buf.PrintTo("%06lX:%08" PRIX32, st.st_size & 0xffffffUL, static_cast<uint32_t>(st.st_mtime));
 
   do {
     std::string check_etag(httpd_req_get_hdr_value_len(req, HTTP_HEADER_IF_NONE_MATCH), '\0');

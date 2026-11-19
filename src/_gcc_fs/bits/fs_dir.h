@@ -433,7 +433,7 @@ _GLIBCXX_BEGIN_NAMESPACE_CXX11
     recursive_directory_iterator(
         const recursive_directory_iterator&) = delete;
 
-    recursive_directory_iterator(recursive_directory_iterator&&);
+    recursive_directory_iterator(recursive_directory_iterator&&) noexcept;
 
     ~recursive_directory_iterator();
 

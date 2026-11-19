@@ -1,5 +1,6 @@
 #include "Handler_SysFunc.hpp"
 
+#include <inttypes.h>
 #include <string>
 #include <vector>
 
@@ -203,7 +204,7 @@ inline constexpr char HTTP_MIME_BINARY[] = "application/octet-stream";
 inline constexpr char HTTP_HEADER_CONTENT_LENGTH[] = "Content-Length";
 inline constexpr char HTTP_HEADER_CONTENT_DISPOSITION[] = "Content-Disposition";
 inline constexpr char HTTP_HEADER_CONTENT_DISPOSITION_VALUE_TMPL[] =
-    "attachment; filename=\"" _ZW_APPLIANCE_NAME "_%d.littlefs\"";
+    "attachment; filename=\"" _ZW_APPLIANCE_NAME "_%" PRIu32 ".littlefs\"";
 
 inline constexpr char HTTPD_409[] = "409 Conflict";
 
@@ -234,8 +235,8 @@ esp_err_t _storage_dump(httpd_req_t* req, const std::string& type) {
     return ESP_OK;
   }
 
-  char size_buf[10];
-  snprintf(size_buf, 10, "%d", accessor->sectors() * SPI_FLASH_SEC_SIZE);
+  char size_buf[12];
+  snprintf(size_buf, sizeof(size_buf), "%u", accessor->sectors() * SPI_FLASH_SEC_SIZE);
   ESP_RETURN_ON_ERROR(httpd_resp_set_hdr(req, HTTP_HEADER_CONTENT_LENGTH, size_buf));
   ESP_RETURN_ON_ERROR(httpd_resp_set_type(req, HTTP_MIME_BINARY));
 
@@ -244,7 +245,8 @@ esp_err_t _storage_dump(httpd_req_t* req, const std::string& type) {
   utils::DataBuf filename;
   ESP_RETURN_ON_ERROR(
       httpd_resp_set_hdr(req, HTTP_HEADER_CONTENT_DISPOSITION,
-                         filename.PrintTo(HTTP_HEADER_CONTENT_DISPOSITION_VALUE_TMPL, tv.tv_sec)));
+                         filename.PrintTo(HTTP_HEADER_CONTENT_DISPOSITION_VALUE_TMPL,
+                                          static_cast<uint32_t>(tv.tv_sec))));
 
   utils::DataBuf data(SPI_FLASH_SEC_SIZE);
   for (size_t idx = 0; idx < accessor->sectors(); idx++) {

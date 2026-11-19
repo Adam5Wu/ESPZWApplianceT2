@@ -1,5 +1,6 @@
 #include "Handler_WebDAV.hpp"
 
+#include <inttypes.h>
 #include <string>
 #include <optional>
 #include <functional>
@@ -95,8 +96,9 @@ esp_err_t _COMMON_FS_HEADERS(const struct stat& st, httpd_req_t* req, utils::Dat
     return httpd_resp_set_hdr(req, DAV_HEADER_LAST_MODIFIED, (char*)&buf.front());
   }));
   ESP_RETURN_ON_ERROR(vcache.AllocAndPrep(20, [&](utils::DataBuf& buf) {
-    return httpd_resp_set_hdr(req, DAV_HEADER_ETAG,
-                              buf.PrintTo("%06lX:%08lX", st.st_size & 0xffffff, st.st_mtime));
+    return httpd_resp_set_hdr(
+        req, DAV_HEADER_ETAG,
+        buf.PrintTo("%06lX:%08" PRIX32, st.st_size & 0xffffffUL, static_cast<uint32_t>(st.st_mtime)));
   }));
   return ESP_OK;
 }
@@ -136,12 +138,12 @@ class PValue {
     return std::find(l.begin(), l.end(), st_) != l.end();
   }
 
-  PValue& operator=(const Type& val) const {
+  PValue& operator=(const Type& val) {
     val_ = val;
     st_ = PVState::PARSED;
     return *this;
   }
-  PValue& operator=(const Type&& val) const {
+  PValue& operator=(Type&& val) {
     val_ = std::move(val);
     st_ = PVState::PARSED;
     return *this;
@@ -609,7 +611,7 @@ inline const char* _DAV_ITEM_PROP(utils::DataBuf& buf, const char* src, const st
   strftime(time_buf, 32, HTTP_DATE_TMPL, gmtime_r(&st.st_mtime, &lt));
 
   utils::DataBuf etag_buf(16);
-  etag_buf.PrintTo("%06lX:%08lX", st.st_size & 0xffffff, st.st_mtime);
+  etag_buf.PrintTo("%06lX:%08" PRIX32, st.st_size & 0xffffffUL, static_cast<uint32_t>(st.st_mtime));
 
   if (S_ISREG(st.st_mode)) {
     return buf.PrintTo(_DAV_XML_RESP_FILE_PROP_TMPL, (char*)href_buf.data(), HTTP_MIME_BINARY,
@@ -824,7 +826,7 @@ esp_err_t DAVHandler::_PUT(void) {
 esp_err_t _handler_webdav(httpd_req_t* req) {
   auto handler = DAVHandler::Create(req);
   if (handler) handler->Run();
-  ESP_LOGD(TAG, "+> Heap: %d; Stack: %d", esp_get_free_heap_size(),
+  ESP_LOGD(TAG, "+> Heap: %" PRIu32 "; Stack: %u", esp_get_free_heap_size(),
            uxTaskGetStackHighWaterMark(NULL));
   return ESP_OK;
 }

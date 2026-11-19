@@ -1,5 +1,6 @@
 #include "Module.hpp"
 
+#include <inttypes.h>
 #include <string>
 
 #include "esp_err.h"
@@ -67,7 +68,7 @@ const char* _chip_short_id(void) {
                efuse_mac[0] ^ efuse_mac[3], efuse_mac[1] ^ efuse_mac[4],
                efuse_mac[2] ^ efuse_mac[5]);
     } else {
-      snprintf(chip_short_id_, sizeof(chip_short_id_), "%06x", esp_random() & 0xffffff);
+      snprintf(chip_short_id_, sizeof(chip_short_id_), "%06" PRIx32, esp_random() & 0xffffff);
       ESP_LOGD(TAG, "Fallback random short ID: %s", chip_short_id_);
     }
   }
@@ -489,7 +490,7 @@ void _network_task_event(int32_t event_id, void*, void*) {
       }
       break;
     default:
-      ESP_LOGW(TAG, "Unrecognized event %d", event_id);
+      ESP_LOGW(TAG, "Unrecognized event %" PRId32, event_id);
   }
 }
 
