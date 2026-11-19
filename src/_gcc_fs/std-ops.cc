@@ -29,9 +29,7 @@
 
 #include "filesystem.h"
 #include <functional>
-#include <ostream>
 #include <stack>
-#include <ext/stdio_filebuf.h>
 #include <stdlib.h>
 #include <stdio.h>
 #include <errno.h>
@@ -291,6 +289,34 @@ namespace std::filesystem
 }
 
 #ifdef _GLIBCXX_HAVE_SYS_STAT_H
+namespace
+{
+  // ESP8266 VFS drivers (LittleFS/SPIFFS/FAT) report st_dev == st_ino == 0 and the VFS
+  // has no links, so two existing entries are the same iff their normalised paths match.
+  // Callers pass absolute VFS paths; relative paths are compared lexically only
+  // (no getcwd() on this target).
+  fs::path
+  normalize_vfs_path(const fs::path& p)
+  {
+    fs::path norm = p.lexically_normal();
+    const auto& s = norm.native();
+    if (s.size() > 1 && s.back() == '/')
+      return fs::path(s.substr(0, s.size() - 1));
+    return norm;
+  }
+
+  bool
+  equiv_files(const fs::path& p1, const fs::stat_type& st1,
+              const fs::path& p2, const fs::stat_type& st2)
+  {
+    if (st1.st_dev != st2.st_dev || st1.st_ino != st2.st_ino)
+      return false;
+    if (st1.st_dev == 0 && st1.st_ino == 0)
+      return normalize_vfs_path(p1) == normalize_vfs_path(p2);
+    return true;
+  }
+}
+
 #ifdef NEED_DO_COPY_FILE
 bool
 fs::do_copy_file(const char* from, const char* to,
@@ -350,8 +376,7 @@ fs::do_copy_file(const char* from, const char* to,
 	  return false;
 	}
 
-      if (to_st->st_dev == from_st->st_dev
-	  && to_st->st_ino == from_st->st_ino)
+      if (equiv_files(to, *to_st, from, *from_st))
 	{
 	  ec = std::make_error_code(std::errc::file_exists);
 	  return false;
@@ -446,39 +471,39 @@ fs::do_copy_file(const char* from, const char* to,
     count -= n;
 #endif // _GLIBCXX_USE_SENDFILE
 
-  using std::ios;
-  __gnu_cxx::stdio_filebuf<char> sbin(in.fd, ios::in|ios::binary);
-  __gnu_cxx::stdio_filebuf<char> sbout(out.fd, ios::out|ios::binary);
-
-  if (sbin.is_open())
-    in.fd = -1;
-  if (sbout.is_open())
-    out.fd = -1;
-
-#ifdef _GLIBCXX_USE_SENDFILE
-  if (n != 0)
-    {
-      if (n < 0)
-	n = 0;
-
-      const auto p1 = sbin.pubseekoff(n, ios::beg, ios::in);
-      const auto p2 = sbout.pubseekoff(n, ios::beg, ios::out);
-
-      const std::streampos errpos(std::streamoff(-1));
-      if (p1 == errpos || p2 == errpos)
-	{
-	  ec = std::make_error_code(std::errc::io_error);
-	  return false;
-	}
-    }
-#endif
-
-  if (count && !(std::ostream(&sbout) << &sbin))
-    {
-      ec = std::make_error_code(std::errc::io_error);
-      return false;
-    }
-  if (!sbout.close() || !sbin.close())
+  // Plain read()/write() copy: avoids basic_filebuf/ostream, which would pull in
+  // the classic std::locale (~4 KB DRAM BSS + ~130 KB flash) on this target.
+  {
+    char buf[256];
+    while (count)
+      {
+	ssize_t r = ::read(in.fd, buf, sizeof(buf));
+	if (r < 0)
+	  {
+	    ec.assign(errno, std::generic_category());
+	    return false;
+	  }
+	if (r == 0)
+	  break;
+	for (ssize_t w = 0; w < r;)
+	  {
+	    ssize_t k = ::write(out.fd, buf + w, r - w);
+	    if (k <= 0)
+	      {
+		ec.assign(k < 0 ? errno : EIO, std::generic_category());
+		return false;
+	      }
+	    w += k;
+	  }
+	count -= ((size_t)r < count) ? (size_t)r : count;
+      }
+    if (count)
+      {
+	ec = std::make_error_code(std::errc::io_error);
+	return false;
+      }
+  }
+  if (!out.close() || !in.close())
     {
       ec.assign(errno, std::generic_category());
       return false;
@@ -525,7 +550,7 @@ fs::copy(const path& from, const path& to, copy_options options,
   f = make_file_status(from_st);
 
   if (exists(t) && !is_other(t) && !is_other(f)
-      && to_st.st_dev == from_st.st_dev && to_st.st_ino == from_st.st_ino)
+      && equiv_files(to, to_st, from, from_st))
     {
       ec = std::make_error_code(std::errc::file_exists);
       return;
@@ -1012,7 +1037,7 @@ fs::equivalent(const path& p1, const path& p2, error_code& ec) noexcept
       ec.clear();
       if (is_other(s1) || is_other(s2))
 	return false;
-      return st1.st_dev == st2.st_dev && st1.st_ino == st2.st_ino;
+      return equiv_files(p1, st1, p2, st2);
     }
   else if (!exists(s1) && !exists(s2))
     ec = std::make_error_code(std::errc::no_such_file_or_directory);
@@ -1119,7 +1144,7 @@ fs::is_empty(const path& p, error_code& ec)
   if (ec)
     return false;
   bool empty = fs::is_directory(s)
-    ? fs::directory_iterator(p, ec)
+    ? !fs::directory_iterator(p, ec)
     : fs::file_size(p, ec) == 0;
   return ec ? false : empty;
 }

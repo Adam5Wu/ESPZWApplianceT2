@@ -295,7 +295,7 @@ const DEBUG_DISCOVER_INFO = {
   },
   "firmware": {
     "name": "ESP8266Base",
-    "version": "1.1.11",
+    "version": "1.1.12",
     "build_time": "May 01 2025 10:00:00"
   }
 };

@@ -1,5 +1,8 @@
 #include <inttypes.h>
 #include <stdio.h>
+#ifdef ZW_FOOTPRINT_PROBE
+#include <memory>
+#endif
 
 #include "esp_err.h"
 #include "esp_log.h"
@@ -12,6 +15,7 @@
 
 #include "ZWUtils.hpp"
 #include "ZWAppConfig.h"
+#include "ZWAppUtils.hpp"
 
 #include "AppStorage/Module.hpp"
 #include "AppConfig/Module.hpp"
@@ -24,6 +28,13 @@ namespace zw::esp8266::app {
 namespace {
 
 inline constexpr char TAG[] = "Main";
+
+#ifdef ZW_FOOTPRINT_PROBE
+struct FootprintCtorProbe {
+  volatile uint32_t magic;
+  FootprintCtorProbe() : magic(0x5A5AA5A5U) {}
+} ctor_probe_;
+#endif
 
 void _stagger_boot(void) {
 #if defined(CONFIG_RESET_REASON) && (CONFIG_COLD_BOOT_STAGGER_MS > 0)
@@ -134,8 +145,24 @@ esp_err_t main(void) {
   ESP_RETURN_ON_ERROR(eventmgr::system_event_register_handler(
       ZW_SYSTEM_EVENT_REBOOT, eventmgr::SystemEventHandlerWrapper<TAG, _reboot_event>));
 
-  // Send the bootstrap signal to start the system
-  eventmgr::system_event_post(ZW_SYSTEM_EVENT_NET_REINIT);
+  // All modules have allocated their RTC memory: verify the salted digest, unlock R/W.
+  ESP_RETURN_ON_ERROR(storage::rtcmem_alloc_complete());
+
+  // Send the bootstrap signal to start the system.
+  ESP_RETURN_ON_ERROR(eventmgr::system_event_post(ZW_SYSTEM_EVENT_BOOT_COMPLETE));
+
+#ifdef ZW_FOOTPRINT_PROBE
+  {
+    int ctor_ok = (ctor_probe_.magic == 0x5A5AA5A5U) ? 1 : 0;
+    int shared_ptr_ok = 1;
+#if !defined(__GNUC__) || __GNUC__ >= 12
+    auto sp = std::make_shared<int>(42);
+    shared_ptr_ok = (sp && *sp == 42) ? 1 : 0;
+#endif
+    ESP_LOGI("PROBE", "[CXX_CHECK] global_ctor=%d shared_ptr=%d", ctor_ok, shared_ptr_ok);
+    log_footprint_state("boot");
+  }
+#endif
   return ESP_OK;
 }
 

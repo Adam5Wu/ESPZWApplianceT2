@@ -22,6 +22,7 @@
 #include "AppStorage/Interface.hpp"
 
 #include "Interface.hpp"
+#include "ZWAppUtils.hpp"
 
 #ifdef ZW_APPLIANCE_COMPONENT_WEB_SYSFUNC
 
@@ -383,8 +384,47 @@ bool sysfunc_storage(const char* feature, httpd_req_t* req) {
   return false;
 }
 
+#ifdef ZW_FOOTPRINT_PROBE
+inline constexpr char FEATURE_HEAP[] = "/heap";
+
+bool sysfunc_heap(const char* feature, httpd_req_t* req) {
+  if (strncmp(feature, FEATURE_HEAP, utils::STRLEN(FEATURE_HEAP)) != 0) return false;
+  if (req->method != HTTP_GET) return false;
+
+  const char* query_frag = feature + utils::STRLEN(FEATURE_HEAP);
+  std::string state = "sta_http";
+  if (*query_frag == '?') {
+    if (auto s = query_parse_param(query_frag, "state", 32)) {
+      state = *s;
+    }
+  }
+  uint32_t free_heap = esp_get_free_heap_size();
+  uint32_t min_free = esp_get_minimum_free_heap_size();
+  size_t free_32bit = heap_caps_get_free_size(MALLOC_CAP_32BIT);
+  // DRAM-only (8-bit / DMA capable) region, excluding the IRAM heap.
+  size_t free_8bit = heap_caps_get_free_size(MALLOC_CAP_8BIT);
+  size_t min_free_8bit = heap_caps_get_minimum_free_size(MALLOC_CAP_8BIT);
+  ESP_LOGI("PROBE",
+           "[FOOTPRINT] state=%s free=%" PRIu32 " min_free=%" PRIu32
+           " free_32bit=%u free_8bit=%u min_free_8bit=%u",
+           state.c_str(), free_heap, min_free, free_32bit, free_8bit, min_free_8bit);
+
+  char resp[224];
+  snprintf(resp, sizeof(resp),
+           "{\"state\":\"%s\",\"free_heap\":%" PRIu32 ",\"min_free_heap\":%" PRIu32
+           ",\"free_32bit\":%u,\"free_8bit\":%u,\"min_free_8bit\":%u}",
+           state.c_str(), free_heap, min_free, free_32bit, free_8bit, min_free_8bit);
+  httpd_resp_set_type(req, HTTPD_TYPE_JSON);
+  httpd_resp_send(req, resp, HTTPD_RESP_USE_STRLEN);
+  return true;
+}
+#endif
+
 const std::vector<SysFuncHandler> subfunc_ = {
     sysfunc_boot_serial, sysfunc_discover, sysfunc_reboot, sysfunc_storage, sysfunc_config,
+#ifdef ZW_FOOTPRINT_PROBE
+    sysfunc_heap,
+#endif
 #ifdef ZW_APPLIANCE_COMPONENT_WEB_NET_PROVISION
     sysfunc_provision,
 #endif

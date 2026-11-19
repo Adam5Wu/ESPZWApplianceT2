@@ -3,6 +3,7 @@
 #define APPSTORAGE_INTERFACE
 
 #include <memory>
+#include <type_traits>
 
 #include <stddef.h>
 #include <stdint.h>
@@ -11,6 +12,8 @@
 #include "esp_system.h"
 
 #include "ZWUtils.hpp"
+
+#include "RTCReflect.hpp"
 
 namespace zw::esp8266::app::storage {
 
@@ -23,19 +26,20 @@ class RTCAlloc {
 
  protected:
   RTCAlloc(void* base) : base_(base) {}
+  const void* data() const;
   esp_err_t update(const void* in, size_t size);
 
-  void* base_;
+  void* base_ = nullptr;
 };
 
 // Simple raw access to a piece of allocated RTC memory.
 class RTCRawData : public RTCAlloc {
  public:
-  const void* get(void) const { return base_; }
+  const void* get(void) const { return data(); }
   esp_err_t update(const void* in, size_t size);
 
  protected:
-  friend RTCRawData rtcmem_alloc(size_t size);
+  friend RTCRawData rtcmem_alloc_raw(size_t, uint32_t, uint32_t);
   RTCRawData(void* base, size_t size) : RTCAlloc(base), size_(size) {}
 
   size_t size_;
@@ -47,7 +51,7 @@ class RTCData : public RTCAlloc {
  public:
   RTCData() = default;
 
-  const T* get(void) const { return (const T*)base_; }
+  const T* get(void) const { return static_cast<const T*>(data()); }
   esp_err_t put(const T* in) { return update(in, sizeof(T)); }
 
   const T& operator*() const { return *get(); }
@@ -59,31 +63,47 @@ class RTCData : public RTCAlloc {
   }
 
  protected:
-  template <typename X>
+  template <typename X, uint32_t N>
   friend RTCData<X> rtcmem_alloc(void);
 
   // Since size is statically defined, no need to track it.
   RTCData(RTCRawData&& alloc) : RTCAlloc(alloc) {}
 };
 
-// Allocate an RTC memory region of given size.
+// Allocate an RTC memory region of given size with compile-time name and type salts.
 // Note that the allocation does NOT initialize (e.g zero-fill)
 // since the entire point of putting data in RTC memory is to
 // persist across reboot.
 //
 // Warning: the order of allocation is *VERY IMPORTANT*!
-// The most meaningful use is to call this function inside a
-// deterministic part of initialization.
+// Callers must allocate during module init() before rtcmem_alloc_complete().
 //
 // Allocation can fail if the space ran out. The caller should
 // check using the bool() operator before use.
-extern RTCRawData rtcmem_alloc(size_t size);
+extern RTCRawData rtcmem_alloc_raw(size_t size, uint32_t name_salt, uint32_t type_salt);
 
 // Allocate a (statically) typed RTC memory region.
-template <typename T>
+template <typename T, uint32_t NameSalt>
 RTCData<T> rtcmem_alloc(void) {
-  return RTCData<T>(rtcmem_alloc(sizeof(T)));
+  constexpr uint32_t kTypeSalt = detail::type_salt<T>();
+  return RTCData<T>(rtcmem_alloc_raw(sizeof(T), NameSalt, kTypeSalt));
 }
+
+#define ZW_RTCMEM_ALLOC(Type, NameLit)                                              \
+  ([] {                                                                             \
+    static_assert(sizeof("" NameLit) > 1, "RTC allocation name must not be empty"); \
+    constexpr uint32_t kNameSalt =                                                  \
+        ::zw::esp8266::app::storage::detail::fnv1a_32("" NameLit);                  \
+    return ::zw::esp8266::app::storage::rtcmem_alloc<Type, kNameSalt>();            \
+  }())
+
+#define ZW_RTCMEM_ALLOC_RAW(Size, NameLit)                                          \
+  ([] {                                                                             \
+    static_assert(sizeof("" NameLit) > 1, "RTC allocation name must not be empty"); \
+    constexpr uint32_t kNameSalt =                                                  \
+        ::zw::esp8266::app::storage::detail::fnv1a_32("" NameLit);                  \
+    return ::zw::esp8266::app::storage::rtcmem_alloc_raw((Size), kNameSalt, 0);     \
+  }())
 
 // Get an exclusive access to the data partition.
 // Useful for backup and restore.

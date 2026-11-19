@@ -149,6 +149,11 @@ esp_err_t _provision_do(const AppConfig::Wifi& config) {
           WIFI_PROV_SECURITY_1, NULL, states_.APName.c_str(),
           config.ap.password.empty() ? NULL : config.ap.password.c_str()));
 
+#ifdef ZW_FOOTPRINT_PROBE
+      vTaskDelay(pdMS_TO_TICKS(500));
+      log_footprint_state("softap_prov");
+#endif
+
       if (config.station) {
         // Wifi station is configured, we are in a proactive provision session.
         // The Wifi station is already configured, we just need to start retrying...
@@ -480,9 +485,19 @@ failed:
   eventmgr::SetSystemFailed();
 }
 
+void _network_boot_event(int32_t, void*, void*) {
+  // Cascade into NET_REINIT so networking starts after all BOOT_COMPLETE handlers finish.
+  // Unregistered when NET_REINIT runs (outside BOOT_COMPLETE dispatch, avoiding
+  // esp_event.c SLIST_FOREACH self-unregister UAF).
+  eventmgr::system_event_post(ZW_SYSTEM_EVENT_NET_REINIT);
+}
+
 void _network_task_event(int32_t event_id, void*, void*) {
   switch (event_id) {
     case ZW_SYSTEM_EVENT_NET_REINIT:
+      eventmgr::system_event_unregister_handler(
+          ZW_SYSTEM_EVENT_BOOT_COMPLETE,
+          eventmgr::SystemEventHandlerWrapper<TAG, _network_boot_event>);
       if (xTaskCreate(ZWTaskWrapper<TAG, _reconfigure>, "zw_wifi_reconfigure", 3000, NULL, 5,
                       NULL) != pdPASS) {
         ESP_LOGE(TAG, "Failed to create WiFi reconfiguration worker!");
@@ -495,6 +510,9 @@ void _network_task_event(int32_t event_id, void*, void*) {
 }
 
 esp_err_t _init_network_task(void) {
+  ESP_RETURN_ON_ERROR(eventmgr::system_event_register_handler(
+      ZW_SYSTEM_EVENT_BOOT_COMPLETE,
+      eventmgr::SystemEventHandlerWrapper<TAG, _network_boot_event>));
   return eventmgr::system_event_register_handler(
       ZW_SYSTEM_EVENT_NET_REINIT, eventmgr::SystemEventHandlerWrapper<TAG, _network_task_event>);
 }
@@ -610,7 +628,6 @@ fallthrough:
 esp_err_t init(void) {
   ESP_LOGD(TAG, "Initializing...");
   ESP_RETURN_ON_ERROR(esp_netif_init());
-  ESP_RETURN_ON_ERROR(esp_event_loop_create_default());
 
   ESP_RETURN_ON_ERROR(_wifi_init());
   ESP_RETURN_ON_ERROR(_init_network_task());

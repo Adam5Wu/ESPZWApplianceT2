@@ -121,16 +121,23 @@ esp_err_t _rebase_time_from_config(void) {
 }
 
 esp_err_t _boot_rebase_time(void) {
+  static_assert(sizeof(time_t) == 4 || sizeof(time_t) == 8, "unexpected time_t size");
 #ifdef ZW_APPLIANCE_COMPONENT_TIME_RTC_TRACKING
-  if (rtc_data_->last_known.tv_sec) {
+  const struct timeval tv = rtc_data_->last_known;
+  const int64_t sec = static_cast<int64_t>(tv.tv_sec);
+  if (sec > 0 && sec < 4102444800LL /* 2100-01-01 */ && tv.tv_usec >= 0 &&
+      tv.tv_usec < 1000000) {
     ESP_LOGD(TAG, "Restoring time from RTC...");
     ESP_RETURN_ON_ERROR(_rebase_time_from_rtcmem());
-  } else
-#endif
-  {
-    ESP_LOGD(TAG, "RTC stored time not available, checking config...");
-    ESP_RETURN_ON_ERROR(_rebase_time_from_config());
+    return ESP_OK;
   }
+  if (tv.tv_sec != 0) {
+    ESP_LOGW(TAG, "RTC stored time out of range, ignoring");
+  } else {
+    ESP_LOGD(TAG, "RTC stored time not available, checking config...");
+  }
+#endif
+  ESP_RETURN_ON_ERROR(_rebase_time_from_config());
   return ESP_OK;
 }
 
@@ -277,16 +284,30 @@ esp_err_t _boot_settimezone(void) {
   return ESP_OK;
 }
 
+void _time_boot_event(int32_t event_id, void* event_data, void* handler_arg) {
+  (void)event_id;
+  (void)event_data;
+  (void)handler_arg;
+  if (_boot_rebase_time() != ESP_OK) {
+    eventmgr::SetSystemFailed();
+    return;
+  }
+  _log();
+  if (_init_time_task() != ESP_OK) {
+    eventmgr::SetSystemFailed();
+    return;
+  }
+}
+
 esp_err_t _init_time() {
 #ifdef ZW_APPLIANCE_COMPONENT_TIME_RTC_TRACKING
-  rtc_data_ = storage::rtcmem_alloc<BootRecord>();
+  rtc_data_ = ZW_RTCMEM_ALLOC(BootRecord, "time.boot");
   if (!rtc_data_) {
     ESP_LOGE(TAG, "Failed to allocate RTC memory...");
     return ESP_ERR_NO_MEM;
   }
 #endif
 
-  ESP_RETURN_ON_ERROR(_boot_rebase_time());
   ESP_RETURN_ON_ERROR(_boot_settimezone());
 
 // Initialize sub-system state
@@ -297,6 +318,9 @@ esp_err_t _init_time() {
 #ifdef ZW_APPLIANCE_COMPONENT_TIME_SMOOTH_LIMIT
   set_adjtime_correction_limit(ZW_APPLIANCE_COMPONENT_TIME_SMOOTH_LIMIT);
 #endif
+
+  ESP_RETURN_ON_ERROR(eventmgr::system_event_register_handler(
+      ZW_SYSTEM_EVENT_BOOT_COMPLETE, eventmgr::SystemEventHandlerWrapper<TAG, _time_boot_event>));
 
   return ESP_OK;
 }
@@ -363,7 +387,6 @@ esp_err_t RefreshConfig(void) {
 esp_err_t init(void) {
   ESP_LOGD(TAG, "Initializing...");
   ESP_RETURN_ON_ERROR(_init_time());
-  ESP_RETURN_ON_ERROR(_init_time_task());
   return ESP_OK;
 }
 

@@ -709,7 +709,7 @@ esp_err_t DAVHandler::_M_RELOC(bool duplicate) {
     return httpd_resp_send_err(req_, HTTPD_400_BAD_REQUEST, "Invalid destination header");
   }
   if (*fs_dest_path == fs_path_) {
-    return httpd_resp_send_err(req_, HTTPD_400_BAD_REQUEST, "Destination same as source");
+    return httpd_resp_send_err(req_, HTTPD_403_FORBIDDEN, "Destination same as source");
   }
 
   if (FS::is_regular_file(fs_path_)) {

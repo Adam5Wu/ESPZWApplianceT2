@@ -14,6 +14,9 @@ namespace zw::esp8266::app::storage {
 // Initialize app storage.
 esp_err_t init(void);
 
+// Finalize RTC memory layout after all modules have registered allocations.
+esp_err_t rtcmem_alloc_complete(void);
+
 // Remount system partition as read/write.
 // For use in live development.
 esp_err_t remount_system_rw(void);

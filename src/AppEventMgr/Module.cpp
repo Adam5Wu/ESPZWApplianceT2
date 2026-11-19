@@ -4,6 +4,8 @@
 #include "esp_log.h"
 #include "esp_event.h"
 
+#include "ZWUtils.hpp"
+
 #include "Interface.hpp"
 
 #include "freertos/FreeRTOS.h"
@@ -61,6 +63,7 @@ esp_err_t init(void) {
     ESP_LOGE(TAG, "Failed to allocate system states group");
     return ESP_ERR_NO_MEM;
   }
+  ESP_RETURN_ON_ERROR(esp_event_loop_create_default());
   return ESP_OK;
 }
 

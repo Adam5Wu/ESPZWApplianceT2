@@ -7,6 +7,7 @@
 namespace zw::esp8266::app::storage {
 
 extern esp_err_t rtcmem_init(void);
+extern esp_err_t rtcmem_finalize_layout(void);
 extern void rtcmem_finit(void);
 
 extern esp_err_t nvs_init(void);

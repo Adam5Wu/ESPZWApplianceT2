@@ -103,6 +103,8 @@ esp_err_t init(void) {
   return ESP_OK;
 }
 
+esp_err_t rtcmem_alloc_complete(void) { return rtcmem_finalize_layout(); }
+
 esp_err_t remount_system_rw(void) {
   ESP_LOGI(TAG, "Re-mounting system partition read/write...");
   ESP_RETURN_ON_ERROR(esp_vfs_littlefs_unregister(ZW_SYSTEM_PART_LABEL));
