@@ -48,6 +48,7 @@ esp_err_t _prov_sta_aplist_get(httpd_req_t* req) {
     }
 
     wifi_scan_config_t params = {};
+    params.show_hidden = true;
     ESP_RETURN_ON_ERROR(esp_wifi_scan_start(&params, true));
 
     uint16_t ap_count = 0;
