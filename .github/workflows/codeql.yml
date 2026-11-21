@@ -32,9 +32,6 @@ jobs:
         - language: c-cpp
           build-mode: manual
           env: esp01_4m
-        - language: c-cpp
-          build-mode: manual
-          env: esp01_4m_gcc16
 
     steps:
     - name: Checkout Repository

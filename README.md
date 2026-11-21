@@ -42,7 +42,7 @@ Below is a comparison table to highlight the feature differences.
 * For `No` features in the new framework, having a `Maybe` tag means they maybe added later,
 and the number of &#9733;s denotes their *relative* priority.
 * The official maintenance of the ESP8266 RTOS SDK seem to have paused, I maintain an
-[enhanced fork](https://github.com/Adam5Wu/ESP8266_RTOS_SDK/tree/deploy/live),
+[enhanced fork](https://github.com/Adam5Wu/ESP8266_RTOS_SDK/tree/deploy/live-gcc16-oss),
 with multiple bug fixes, backports and feature improvements.
 
 ## How to Create Appliance
