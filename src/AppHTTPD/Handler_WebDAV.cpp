@@ -7,9 +7,16 @@
 #include <initializer_list>
 #include <algorithm>
 #include <utility>
+#include <vector>
+#include <dirent.h>
+#include <errno.h>
+#include <string.h>
 #include <sys/stat.h>
+#include <sys/types.h>
+#include <unistd.h>
 
-#include "_gcc_fs/filesystem.h"
+#include <filesystem>
+#include <system_error>
 
 #include "esp_err.h"
 #include "esp_log.h"
@@ -107,6 +114,15 @@ esp_err_t _COMMON_FS_HEADERS(const struct stat& st, httpd_req_t* req, utils::Dat
 FS::path _NORMALIZE_PATH(const FS::path& path) {
   FS::path norm_path = path.lexically_normal();
   return norm_path.filename().empty() ? norm_path.parent_path() : norm_path;
+}
+
+inline bool _IS_SAME_OR_DESCENDANT(const FS::path& src, const FS::path& dest) {
+  const std::string& s = src.native();
+  const std::string& d = dest.native();
+  if (d == s) return true;
+  if (s == "/") return !d.empty() && d.front() == URI_PATH_DELIM;
+  return d.size() > s.size() && d[s.size()] == URI_PATH_DELIM &&
+         d.compare(0, s.size(), s) == 0;
 }
 
 const char* _DAV_XML_ERROR(utils::DataBuf& buf, const char* element, const char* href) {
@@ -295,7 +311,11 @@ esp_err_t DAVHandler::Run(void) {
 
 inline esp_err_t _DAV_RELOC_FILE(const FS::path& src, const FS::path& dest,
                                  const PValue<bool>& overwrite, bool duplicate, httpd_req_t* req) {
-  bool dest_exists = FS::exists(dest);
+  std::error_code ec;
+  bool dest_exists = FS::exists(dest, ec);
+  if (ec) {
+    return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, ec.message().c_str());
+  }
   if (dest_exists) {
     if (!overwrite.value_or(true)) {
       return httpd_resp_send_custom_err(req, DAV_STATUS_412_PRECONDITION_FAILED,
@@ -303,14 +323,18 @@ inline esp_err_t _DAV_RELOC_FILE(const FS::path& src, const FS::path& dest,
     }
   } else {
     FS::path dest_parent = dest.parent_path();
-    if (!FS::is_directory(dest_parent)) {
+    FS::file_status parent_st = FS::status(dest_parent, ec);
+    if (!FS::status_known(parent_st)) {
+      return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, ec.message().c_str());
+    }
+    if (!FS::is_directory(parent_st)) {
       return httpd_resp_send_custom_err(req, DAV_STATUS_409_CONFLICT,
                                         "Destination parent dir DNE");
     }
   }
 
   // Perform file copy or move
-  std::error_code ec;
+  ec.clear();
   if (duplicate) {
     copy_options copt =
         overwrite.value_or(true) ? copy_options::overwrite_existing : copy_options::none;
@@ -331,6 +355,207 @@ inline esp_err_t _DAV_RELOC_FILE(const FS::path& src, const FS::path& dest,
   return httpd_resp_send(req, NULL, 0);
 }
 
+inline std::string _DAV_JOIN_PATH(const std::string& base, const char* name) {
+  std::string out;
+  out.reserve(base.length() + 1 + strlen(name));
+  out.assign(base);
+  if (out.empty() || out.back() != URI_PATH_DELIM) out.push_back(URI_PATH_DELIM);
+  out.append(name);
+  return out;
+}
+
+inline bool _DAV_COPY_FILE_RAW(const char* src, const char* dst, char* buf, size_t buf_sz,
+                               std::error_code& ec) {
+  FILE* fin = fopen(src, "rb");
+  if (!fin) {
+    ec.assign(errno, std::generic_category());
+    return false;
+  }
+  FILE* fout = fopen(dst, "wb");
+  if (!fout) {
+    ec.assign(errno, std::generic_category());
+    fclose(fin);
+    return false;
+  }
+  bool ok = true;
+  int err = 0;
+  while (size_t n = fread(buf, 1, buf_sz, fin)) {
+    if (fwrite(buf, 1, n, fout) != n) {
+      err = errno ? errno : EIO;
+      ok = false;
+      break;
+    }
+  }
+  if (ok && ferror(fin)) {
+    err = errno ? errno : EIO;
+    ok = false;
+  }
+  if (fclose(fout) != 0 && ok) {
+    err = errno ? errno : EIO;
+    ok = false;
+  }
+  fclose(fin);
+  if (!ok) {
+    ec.assign(err, std::generic_category());
+    return false;
+  }
+  ec.clear();
+  return true;
+}
+
+inline void _DAV_COPY_DIR(const FS::path& src, const FS::path& dest, std::error_code& ec) {
+  std::string copy_buf(1024, '\0');
+  struct DirPair {
+    std::string src;
+    std::string dest;
+  };
+  std::vector<DirPair> stack;
+  stack.push_back({src.native(), dest.native()});
+
+  while (!stack.empty()) {
+    DirPair cur = std::move(stack.back());
+    stack.pop_back();
+
+    struct stat st = {};
+    if (stat(cur.dest.c_str(), &st) != 0) {
+      if (errno != ENOENT) {
+        ec.assign(errno, std::generic_category());
+        return;
+      }
+      if (mkdir(cur.dest.c_str(), 0777) != 0) {
+        ec.assign(errno, std::generic_category());
+        return;
+      }
+    } else if (!S_ISDIR(st.st_mode)) {
+      ec = std::make_error_code(std::errc::not_a_directory);
+      return;
+    }
+
+    // Collect children before descending/copying so the directory handle closes first.
+    std::vector<std::pair<std::string, bool>> entries;
+    {
+      utils::AutoReleaseRes<DIR*> dir(opendir(cur.src.c_str()), [](DIR* d) {
+        if (d) closedir(d);
+      });
+      if (!*dir) {
+        ec.assign(errno, std::generic_category());
+        return;
+      }
+      errno = 0;
+      while (struct dirent* ent = readdir(*dir)) {
+        if (strcmp(ent->d_name, ".") == 0 || strcmp(ent->d_name, "..") == 0) continue;
+        std::string child = _DAV_JOIN_PATH(cur.src, ent->d_name);
+        struct stat est = {};
+        if (stat(child.c_str(), &est) != 0) {
+          ec.assign(errno, std::generic_category());
+          return;
+        }
+        entries.push_back({std::string(ent->d_name), S_ISDIR(est.st_mode)});
+        errno = 0;
+      }
+      if (errno != 0) {
+        ec.assign(errno, std::generic_category());
+        return;
+      }
+    }
+
+    for (const auto& [name, is_dir] : entries) {
+      std::string c_src = _DAV_JOIN_PATH(cur.src, name.c_str());
+      std::string c_dst = _DAV_JOIN_PATH(cur.dest, name.c_str());
+      if (is_dir) {
+        stack.push_back({std::move(c_src), std::move(c_dst)});
+      } else if (!_DAV_COPY_FILE_RAW(c_src.c_str(), c_dst.c_str(), &copy_buf[0],
+                                    copy_buf.size(), ec)) {
+        return;
+      }
+    }
+  }
+  ec.clear();
+}
+
+inline void _DAV_REMOVE_ALL(const FS::path& target, std::error_code& ec) {
+  struct Frame {
+    std::string path;
+    bool expanded;
+  };
+  struct stat st = {};
+  if (stat(target.c_str(), &st) != 0) {
+    if (errno == ENOENT) {
+      ec.clear();
+      return;
+    }
+    ec.assign(errno, std::generic_category());
+    return;
+  }
+  if (!S_ISDIR(st.st_mode)) {
+    if (unlink(target.c_str()) != 0 && errno != ENOENT) {
+      ec.assign(errno, std::generic_category());
+      return;
+    }
+    ec.clear();
+    return;
+  }
+
+  std::vector<Frame> stack;
+  stack.push_back({target.native(), false});
+
+  while (!stack.empty()) {
+    if (stack.back().expanded) {
+      std::string dir_path = std::move(stack.back().path);
+      stack.pop_back();
+      if (rmdir(dir_path.c_str()) != 0 && errno != ENOENT) {
+        ec.assign(errno, std::generic_category());
+        return;
+      }
+      continue;
+    }
+
+    stack.back().expanded = true;
+    std::string cur_dir = stack.back().path;
+    std::vector<std::pair<std::string, bool>> children;
+    {
+      utils::AutoReleaseRes<DIR*> dir(opendir(cur_dir.c_str()), [](DIR* d) {
+        if (d) closedir(d);
+      });
+      if (!*dir) {
+        if (errno == ENOENT) continue;
+        ec.assign(errno, std::generic_category());
+        return;
+      }
+      errno = 0;
+      while (struct dirent* ent = readdir(*dir)) {
+        if (strcmp(ent->d_name, ".") == 0 || strcmp(ent->d_name, "..") == 0) continue;
+        std::string child = _DAV_JOIN_PATH(cur_dir, ent->d_name);
+        struct stat cst = {};
+        if (stat(child.c_str(), &cst) != 0) {
+          if (errno == ENOENT) {
+            errno = 0;
+            continue;
+          }
+          ec.assign(errno, std::generic_category());
+          return;
+        }
+        children.push_back({std::move(child), S_ISDIR(cst.st_mode)});
+        errno = 0;
+      }
+      if (errno != 0) {
+        ec.assign(errno, std::generic_category());
+        return;
+      }
+    }
+
+    for (auto& [child_path, is_dir] : children) {
+      if (is_dir) {
+        stack.push_back({std::move(child_path), false});
+      } else if (unlink(child_path.c_str()) != 0 && errno != ENOENT) {
+        ec.assign(errno, std::generic_category());
+        return;
+      }
+    }
+  }
+  ec.clear();
+}
+
 inline esp_err_t _DAV_RELOC_DIR(const FS::path& src, const FS::path& dest,
                                 const PValue<bool>& overwrite, const PValue<int8_t>& depth,
                                 bool duplicate, httpd_req_t* req) {
@@ -339,21 +564,39 @@ inline esp_err_t _DAV_RELOC_DIR(const FS::path& src, const FS::path& dest,
     return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Unsupported depth on dir");
   }
 
-  bool dest_exists = FS::exists(dest);
+  std::error_code ec;
+  FS::file_status dest_st = FS::status(dest, ec);
+  if (!FS::status_known(dest_st)) {
+    return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, ec.message().c_str());
+  }
+  bool dest_exists = FS::exists(dest_st);
   if (dest_exists) {
     if (!overwrite.value_or(true)) {
       return httpd_resp_send_custom_err(req, DAV_STATUS_412_PRECONDITION_FAILED,
                                         "Destination dir exists");
     }
-    if (trans_closure && !FS::is_empty(dest)) {
-      std::error_code ec;
-      if (FS::remove_all(dest, ec), ec.value() != 0) {
-        return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, ec.message().c_str());
+    if (trans_closure) {
+      bool need_remove = !FS::is_directory(dest_st);
+      if (!need_remove) {
+        bool dest_empty = FS::is_empty(dest, ec);
+        if (ec) {
+          return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, ec.message().c_str());
+        }
+        need_remove = !dest_empty;
+      }
+      if (need_remove) {
+        if (_DAV_REMOVE_ALL(dest, ec), ec.value() != 0) {
+          return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, ec.message().c_str());
+        }
       }
     }
   } else {
     FS::path dest_parent = dest.parent_path();
-    if (!FS::is_directory(dest_parent)) {
+    FS::file_status parent_st = FS::status(dest_parent, ec);
+    if (!FS::status_known(parent_st)) {
+      return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, ec.message().c_str());
+    }
+    if (!FS::is_directory(parent_st)) {
       return httpd_resp_send_custom_err(req, DAV_STATUS_409_CONFLICT,
                                         "Destination parent dir DNE");
     }
@@ -365,7 +608,7 @@ inline esp_err_t _DAV_RELOC_DIR(const FS::path& src, const FS::path& dest,
     if (dest_exists) {
       return httpd_resp_set_status(req, HTTPD_204);
     }
-    std::error_code ec;
+    ec.clear();
     if (FS::create_directory(dest, ec), ec.value() != 0) {
       return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, ec.message().c_str());
     }
@@ -375,9 +618,9 @@ inline esp_err_t _DAV_RELOC_DIR(const FS::path& src, const FS::path& dest,
   }
 
   // Perform dir copy or move
-  std::error_code ec;
+  ec.clear();
   if (duplicate) {
-    FS::copy(src, dest, copy_options::recursive, ec);
+    _DAV_COPY_DIR(src, dest, ec);
   } else {
     FS::rename(src, dest, ec);
   }
@@ -501,8 +744,8 @@ inline esp_err_t _DAV_SEND_DIR(const FS::path& src, httpd_req_t* req, bool conte
   memset((char*)&fmt_buf.front(), '-', strlen(entry_str) - 1);
   ESP_RETURN_ON_ERROR(httpd_resp_send_chunk(req, entry_str, HTTPD_RESP_USE_STRLEN));
 
-  FS::directory_iterator iter(src);
-  for (; iter; ++iter) {
+  std::error_code ec;
+  for (FS::directory_iterator iter(src, ec), end; !ec && iter != end; iter.increment(ec)) {
     const FS::path& entry = iter->path();
     st = {};
     if (stat(entry.c_str(), &st) != 0) {
@@ -512,6 +755,9 @@ inline esp_err_t _DAV_SEND_DIR(const FS::path& src, httpd_req_t* req, bool conte
     const char* entry_buf = _DAV_DIR_ITEM(fmt_buf, entry.filename().c_str(), st);
     if (entry_buf == nullptr) continue;
     ZW_BREAK_ON_ERROR_SIMPLE(httpd_resp_send_chunk(req, entry_buf, HTTPD_RESP_USE_STRLEN));
+  }
+  if (ec) {
+    ESP_LOGW(TAG, "Directory iteration error on %s: %s", src.c_str(), ec.message().c_str());
   }
   ESP_RETURN_ON_ERROR(httpd_resp_send_chunk(req, _DAV_DIR_HTML_RESP_BODY_POSTAMBLE,
                                             utils::STRLEN(_DAV_DIR_HTML_RESP_BODY_POSTAMBLE)));
@@ -532,7 +778,7 @@ inline esp_err_t _DAV_DELETE_DIR(const FS::path& src, PValue<int8_t> depth, http
     return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid depth for delete dir");
   }
   std::error_code ec;
-  if (FS::remove_all(src, ec), ec.value() != 0) {
+  if (_DAV_REMOVE_ALL(src, ec), ec.value() != 0) {
     return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, ec.message().c_str());
   }
   ESP_RETURN_ON_ERROR(httpd_resp_set_status(req, HTTPD_204));
@@ -540,12 +786,17 @@ inline esp_err_t _DAV_DELETE_DIR(const FS::path& src, PValue<int8_t> depth, http
 }
 
 inline esp_err_t _DAV_CREATE_DIR(const FS::path& src, httpd_req_t* req) {
+  std::error_code ec;
   FS::path dest_parent = src.parent_path();
-  if (!FS::is_directory(dest_parent)) {
+  FS::file_status parent_st = FS::status(dest_parent, ec);
+  if (!FS::status_known(parent_st)) {
+    return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, ec.message().c_str());
+  }
+  if (!FS::is_directory(parent_st)) {
     return httpd_resp_send_custom_err(req, DAV_STATUS_409_CONFLICT, "Target parent dir DNE");
   }
 
-  std::error_code ec;
+  ec.clear();
   if (FS::create_directory(src, ec), ec.value() != 0) {
     return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, ec.message().c_str());
   }
@@ -554,8 +805,13 @@ inline esp_err_t _DAV_CREATE_DIR(const FS::path& src, httpd_req_t* req) {
 }
 
 esp_err_t _DAV_RECV_FILE(const FS::path& dest, httpd_req_t* req) {
-  bool dest_exists = FS::exists(dest);
-  if (dest_exists && !FS::is_regular_file(dest)) {
+  std::error_code ec;
+  FS::file_status st = FS::status(dest, ec);
+  if (!FS::status_known(st)) {
+    return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, ec.message().c_str());
+  }
+  bool dest_exists = FS::exists(st);
+  if (dest_exists && !FS::is_regular_file(st)) {
     return httpd_resp_send_custom_err(req, DAV_STATUS_409_CONFLICT, "Target already exists");
   }
   size_t len_to_read = req->content_len;
@@ -645,8 +901,8 @@ esp_err_t _DAV_PROPFIND(const FS::path& src, uint8_t depth, httpd_req_t* req) {
 
     if (depth == 0 || !S_ISDIR(st.st_mode)) break;
 
-    FS::directory_iterator iter(src);
-    for (; iter; ++iter) {
+    std::error_code ec;
+    for (FS::directory_iterator iter(src, ec), end; !ec && iter != end; iter.increment(ec)) {
       const FS::path& entry = iter->path();
       st = {};
       if (stat(entry.c_str(), &st) != 0) {
@@ -656,6 +912,9 @@ esp_err_t _DAV_PROPFIND(const FS::path& src, uint8_t depth, httpd_req_t* req) {
       const char* entry_buf = _DAV_ITEM_PROP(buf, entry.c_str(), st);
       if (entry_buf == nullptr) continue;
       ZW_BREAK_ON_ERROR_SIMPLE(httpd_resp_send_chunk(req, entry_buf, HTTPD_RESP_USE_STRLEN));
+    }
+    if (ec) {
+      ESP_LOGW(TAG, "Directory iteration error on %s: %s", src.c_str(), ec.message().c_str());
     }
   } while (0);
 
@@ -692,7 +951,12 @@ PValue<FS::path> DAVHandler::_GetHeaderDestination(void) {
 }
 
 esp_err_t DAVHandler::_M_RELOC(bool duplicate) {
-  if (!FS::exists(fs_path_)) {
+  std::error_code ec;
+  FS::file_status st = FS::status(fs_path_, ec);
+  if (!FS::status_known(st)) {
+    return httpd_resp_send_err(req_, HTTPD_500_INTERNAL_SERVER_ERROR, ec.message().c_str());
+  }
+  if (!FS::exists(st)) {
     return httpd_resp_send_err(req_, HTTPD_404_NOT_FOUND, "Source does not exist");
   }
   auto overwrite = _GetHeaderOverwrite();
@@ -708,54 +972,70 @@ esp_err_t DAVHandler::_M_RELOC(bool duplicate) {
   if (fs_dest_path.state() == PVState::INVALID) {
     return httpd_resp_send_err(req_, HTTPD_400_BAD_REQUEST, "Invalid destination header");
   }
-  if (*fs_dest_path == fs_path_) {
-    return httpd_resp_send_err(req_, HTTPD_403_FORBIDDEN, "Destination same as source");
+  if (_IS_SAME_OR_DESCENDANT(fs_path_, *fs_dest_path)) {
+    return httpd_resp_send_err(req_, HTTPD_403_FORBIDDEN,
+                               "Destination same as or inside source");
   }
 
-  if (FS::is_regular_file(fs_path_)) {
+  if (FS::is_regular_file(st)) {
     if (depth.value_or(0) != 0) {
       return httpd_resp_send_err(req_, HTTPD_400_BAD_REQUEST, "Unsupported depth on file");
     }
     return _DAV_RELOC_FILE(fs_path_, *fs_dest_path, overwrite, duplicate, req_);
-  } else if (FS::is_directory(fs_path_)) {
+  } else if (FS::is_directory(st)) {
     return _DAV_RELOC_DIR(fs_path_, *fs_dest_path, overwrite, depth, duplicate, req_);
   }
   return httpd_resp_send_err(req_, HTTPD_501_METHOD_NOT_IMPLEMENTED, "Unsupported source");
 }
 
 esp_err_t DAVHandler::_DELETE(void) {
-  if (!FS::exists(fs_path_)) {
+  std::error_code ec;
+  FS::file_status st = FS::status(fs_path_, ec);
+  if (!FS::status_known(st)) {
+    return httpd_resp_send_err(req_, HTTPD_500_INTERNAL_SERVER_ERROR, ec.message().c_str());
+  }
+  if (!FS::exists(st)) {
     return httpd_resp_send_err(req_, HTTPD_404_NOT_FOUND, "Source does not exist");
   }
   auto depth = _GetHeaderDepth();
   if (depth.state() == PVState::INVALID) {
     return httpd_resp_send_err(req_, HTTPD_400_BAD_REQUEST, "Invalid depth header");
   }
-  if (FS::is_regular_file(fs_path_)) {
+  if (FS::is_regular_file(st)) {
     if (depth.value_or(0) != 0) {
       return httpd_resp_send_err(req_, HTTPD_400_BAD_REQUEST, "Unsupported delete depth on file");
     }
     return _DAV_DELETE_FILE(fs_path_, req_);
   }
-  if (FS::is_directory(fs_path_)) {
+  if (FS::is_directory(st)) {
     return _DAV_DELETE_DIR(fs_path_, depth, req_);
   }
   return httpd_resp_send_err(req_, HTTPD_501_METHOD_NOT_IMPLEMENTED, "Unsupported source");
 }
 
 esp_err_t DAVHandler::_M_SEND(bool content) {
-  if (!FS::exists(fs_path_)) {
+  std::error_code ec;
+  FS::file_status st = FS::status(fs_path_, ec);
+  if (!FS::status_known(st)) {
+    return httpd_resp_send_err(req_, HTTPD_500_INTERNAL_SERVER_ERROR, ec.message().c_str());
+  }
+  if (!FS::exists(st)) {
     return httpd_resp_send_err(req_, HTTPD_404_NOT_FOUND, "Source does not exist");
   }
-  if (FS::is_regular_file(fs_path_))
+  if (FS::is_regular_file(st))
     return _DAV_SEND_FILE(fs_path_, req_, content);
-  else if (FS::is_directory(fs_path_))
+  else if (FS::is_directory(st))
     return _DAV_SEND_DIR(fs_path_, req_, content);
   return httpd_resp_send_err(req_, HTTPD_501_METHOD_NOT_IMPLEMENTED, "Unsupported source");
 }
 
 esp_err_t DAVHandler::_MKCOL(void) {
-  if (FS::exists(fs_path_)) {
+  std::error_code ec;
+  bool target_exists = FS::exists(fs_path_, ec);
+  if (ec) {
+    return httpd_resp_send_err(req_, HTTPD_500_INTERNAL_SERVER_ERROR, ec.message().c_str());
+  }
+  if (target_exists) {
     return httpd_resp_send_custom_err(req_, DAV_STATUS_409_CONFLICT, "Target already exists");
   }
   if (req_->content_len != 0) {
@@ -780,7 +1060,12 @@ esp_err_t DAVHandler::_OPTIONS(void) {
 }
 
 esp_err_t DAVHandler::_PROPFIND(void) {
-  if (!FS::exists(fs_path_)) {
+  std::error_code ec;
+  bool src_exists = FS::exists(fs_path_, ec);
+  if (ec) {
+    return httpd_resp_send_err(req_, HTTPD_500_INTERNAL_SERVER_ERROR, ec.message().c_str());
+  }
+  if (!src_exists) {
     return httpd_resp_send_err(req_, HTTPD_404_NOT_FOUND, "Source does not exist");
   }
   auto depth = _GetHeaderDepth();
@@ -800,7 +1085,12 @@ esp_err_t DAVHandler::_PROPFIND(void) {
 }
 
 esp_err_t DAVHandler::_PROPPATCH(void) {
-  if (!FS::exists(fs_path_)) {
+  std::error_code ec;
+  bool src_exists = FS::exists(fs_path_, ec);
+  if (ec) {
+    return httpd_resp_send_err(req_, HTTPD_500_INTERNAL_SERVER_ERROR, ec.message().c_str());
+  }
+  if (!src_exists) {
     return httpd_resp_send_err(req_, HTTPD_404_NOT_FOUND, "Source does not exist");
   }
   // The only meaningful attribute to support is `getlastmodified`
@@ -815,7 +1105,11 @@ esp_err_t DAVHandler::_PROPPATCH(void) {
 
 esp_err_t DAVHandler::_PUT(void) {
 #ifdef __ESP_FS_HAS_VFSSTAT
-  auto space_info = FS::space(fs_path_);
+  std::error_code ec;
+  auto space_info = FS::space(fs_path_, ec);
+  if (ec) {
+    return httpd_resp_send_err(req_, HTTPD_500_INTERNAL_SERVER_ERROR, ec.message().c_str());
+  }
   if (space_info.available < req_->content_len + SPI_FLASH_SEC_SIZE) {
     return httpd_resp_send_custom_err(req_, DAV_STATUS_409_CONFLICT, "Insufficient space");
   }
